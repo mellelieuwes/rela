@@ -1450,6 +1450,10 @@ incoming` pulls candidates from the relation's source types (`from`); `outgoing`
 is the target's **display title** (honoring each type's `display_property`), not
 its ID.
 
+**Property filter controls** without declared `values:` render as a text box.
+On a `string` property it matches case-insensitively on a substring (`filter[x][contains]`);
+on other types (dates, numbers) it matches the exact value.
+
 Notes:
 
 - Two targets that resolve to the same display title collapse to one option and

@@ -278,4 +278,38 @@ describe('FilterBar — property filters still render as before', () => {
     expect(wrapper.find('select').exists()).toBe(true)
     expect(wrapper.findComponent(EntityTargetSelect).exists()).toBe(false)
   })
+
+  describe('text box', () => {
+    const config: ListConfig = {
+      entity: 'taak',
+      columns: [],
+      filter_controls: [{ property: 'owner' }, { property: 'points' }],
+    }
+    const entityType: EntityType = {
+      label: 'Taak',
+      properties: { owner: { type: 'string' }, points: { type: 'integer' } },
+    }
+
+    async function typeInto(index: number, value: string) {
+      vi.useFakeTimers()
+      try {
+        const wrapper = mount(FilterBar, { props: { config, entityType, filters: {} } })
+        await flushPromises()
+        await wrapper.findAll('input')[index].setValue(value)
+        vi.advanceTimersByTime(300)
+        const emits = wrapper.emitted('filter') ?? []
+        return emits[emits.length - 1]?.[0]
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+
+    it('on a string property matches case-insensitively on a substring', async () => {
+      expect(await typeInto(0, 'anna')).toEqual({ owner: { value: 'anna', op: '~' } })
+    })
+
+    it('on a non-string property keeps exact equality', async () => {
+      expect(await typeInto(1, '5')).toEqual({ points: { value: '5' } })
+    })
+  })
 })

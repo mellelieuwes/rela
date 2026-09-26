@@ -53,6 +53,9 @@ interface ResolvedFilter {
   // Display labels keyed by option value (display-only; filter value stays raw).
   optionLabels: Record<string, string>
   isRelation: boolean
+  // Text widgets on string properties match case-insensitively on a substring
+  // (the API's `contains`), so users need not type the exact stored value.
+  substring?: boolean
   // relation widgets only:
   relationCandidates?: Entity[]
   relationMode?: 'select' | 'typeahead'
@@ -96,14 +99,15 @@ function resolveFilter(fc: FilterControl): ResolvedFilter {
   // Property filter
   const propDef = props.entityType?.properties[fc.property || '']
   if (!propDef) {
-    return { key, label, widget: 'text', options: [], optionLabels: {}, isRelation: false }
+    return { key, label, widget: 'text', options: [], optionLabels: {}, isRelation: false, substring: true }
   }
 
   const options = propDef.values || []
   const widget = resolveWidgetType(propDef, options)
   const optionLabels = schemaStore.resolveOptionLabels(propDef, fc.property || '', props.entityType)
 
-  return { key, label, widget, options, optionLabels, isRelation: false }
+  const substring = widget === 'text' && propDef.type === 'string'
+  return { key, label, widget, options, optionLabels, isRelation: false, substring }
 }
 
 // Source entity types for a relation filter's option candidates. Incoming
@@ -227,10 +231,12 @@ watch(
 
 function buildState(): FilterState {
   const state: FilterState = {}
+  const substringKeys = new Set(resolvedFilters.value.filter((f) => f.substring).map((f) => f.key))
   for (const [key, value] of Object.entries(localFilters.value)) {
     if (!value) continue
     const fv: FilterState[string] = { value }
-    const op = preservedOps.value[key]
+    // A deep-linked operator wins; otherwise a string text box matches on `~`.
+    const op = preservedOps.value[key] ?? (substringKeys.has(key) ? '~' : undefined)
     // Omit op when it's absent or the default '=' form — same convention
     // as buildQueryWithFilters, so the state shape is canonical throughout.
     if (op && op !== '=') fv.op = op

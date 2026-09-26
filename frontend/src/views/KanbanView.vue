@@ -149,6 +149,9 @@ const boardParams = computed<ListParams | undefined>(() => {
   return Object.keys(params).length ? params : undefined
 })
 
+// The board whose data the query last resolved; see placeholderData below.
+let heldBoardId: string | undefined
+
 const boardQuery = useQuery({
   // listParams, not the param-free `list`: the world has to separate cache
   // entries. It still shares the `list(type)` prefix, so SSE invalidation
@@ -157,12 +160,20 @@ const boardQuery = useQuery({
   // The signal matters more here than on single-fetch queries: when a
   // refetch supersedes this call (drag-drop settle, SSE echo), it also
   // cancels the remaining page fetches of the superseded loop.
-  query: ({ signal }) => {
+  query: async ({ signal }) => {
     const config = kanbanConfig.value
     if (!config) throw new Error(`unknown kanban view: ${props.id}`)
-    return listAllEntities(config.entity, boardParams.value, signal)
+    const boardId = props.id
+    const result = await listAllEntities(config.entity, boardParams.value, signal)
+    heldBoardId = boardId
+    return result
   },
   enabled: () => !!kanbanConfig.value,
+  // A filter change is a new key, which would start out pending and blank the
+  // board while every page reloads. Hold the previous cards instead, as
+  // EntityList does — but only for the same board: this view is reused across
+  // boards, and another board's cards must not appear under this one's columns.
+  placeholderData: (prev) => (heldBoardId === props.id ? prev : undefined),
 })
 
 const entities = computed(() => boardQuery.data.value?.data ?? [])

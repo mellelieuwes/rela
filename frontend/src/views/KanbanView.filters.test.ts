@@ -3,6 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { PiniaColada } from '@pinia/colada'
 import KanbanView from './KanbanView.vue'
+import FilterBar from '@/components/lists/FilterBar.vue'
 import { useSchemaStore } from '@/stores/schema'
 import { _setEntityPluralForTest } from '@/api/entities'
 import type { Entity, ListResponse } from '@/types'
@@ -115,6 +116,19 @@ describe('KanbanView filter controls', () => {
     expect(params?.['filter[toegewezen_aan]']).toBe('Anna')
     // The server already filtered: the board must not drop the card again
     // client-side (the card has no `toegewezen_aan` property).
+    expect(wrapper.text()).toContain('Werk van Anna')
+  })
+
+  it('keeps the cards on screen while a filter change reloads the board', async () => {
+    const wrapper = await mountBoard()
+    listAllEntitiesMock.mockReturnValue(new Promise(() => {}))
+
+    wrapper.findComponent(FilterBar).vm.$emit('filter', { toegewezen_aan: { value: 'Bram' } })
+    await flushPromises()
+
+    const calls = listAllEntitiesMock.mock.calls
+    expect(calls[calls.length - 1][1]?.['filter[toegewezen_aan]']).toBe('Bram')
+    expect(wrapper.text()).not.toContain('Loading board')
     expect(wrapper.text()).toContain('Werk van Anna')
   })
 })
