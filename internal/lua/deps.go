@@ -64,12 +64,13 @@ type ReadDeps struct {
 	// purely node/title pruning inside the decorator).
 	Tracer tracer.Tracer
 
-	// Searcher produces search hits. NOTE: hits themselves are NOT gated —
-	// rela.search hydrates each hit through VisibleReader and drops the
-	// ones it cannot read, so no hidden entity or property reaches the
-	// script. A timing/count residual remains (an attacker could infer that
-	// *something* matched); that is the TKT-GGQ0JT class of oracle and is
-	// tracked there, not silently ignored here.
+	// Searcher produces search hits. rela.search hydrates each hit through
+	// VisibleReader and drops the ones it cannot read, so no hidden entity
+	// or property reaches the script. Whether the hit list itself is gated
+	// depends on the wiring: appbuild's GatedReads (remote MCP) supplies a
+	// visibility.Searcher, which also drops matches on hidden properties;
+	// the other wirings supply the raw searcher, where a timing/count
+	// residual remains (the TKT-GGQ0JT class of oracle).
 	Searcher search.Searcher
 
 	Meta        *metamodel.Metamodel

@@ -321,7 +321,8 @@ deps:
   # (dataentry) and the protocol server it mounts inside it (mcp) — the same
   # pairing `cli` already has for the stdio transport. Keeping the MCP wiring
   # here is what lets `dataentry` take a plain http.Handler and stay off the
-  # go-sdk (TKT-BDG8U9).
+  # go-sdk (TKT-BDG8U9). It names `lua` only to pair the gated Lua read
+  # bundle with the entity manager for the remote MCP Lua tools (TKT-4QSZ8Y).
   cmdServer:
     mayDependOn:
       - acl
@@ -330,6 +331,7 @@ deps:
       - cmdexec
       - dataentry
       - jwtauth
+      - lua
       - mcp
       - principal
       - scheduler
@@ -583,6 +585,9 @@ deps:
       - store
       - tracer
       - validator
+      # visibility.Readable: the write tools gate the ids they name through
+      # the injected (gated) reader before calling entitymanager.
+      - visibility
     canUse:
       - mcpgo
       - fsnotify
@@ -897,6 +902,9 @@ deps:
       - affordances
       - entity
       - principal
+      # visibility.Searcher gates search hits for identity-bearing consumers
+      # (remote MCP, Lua), the pattern search.VisibleSearcher started.
+      - search
       - store
       - tracer
   audit:
@@ -1286,6 +1294,9 @@ deps:
       - secrets
       - store
       - tracer
+      # visibility.Readable: the write bindings gate the ids they name through
+      # the runtime's VisibleReader before calling the manager.
+      - visibility
     canUse:
       - goldmark
       - gopherlua

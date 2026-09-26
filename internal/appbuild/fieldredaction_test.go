@@ -20,7 +20,9 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
+	"github.com/Sourcehaven-BV/rela/internal/search"
 	"github.com/Sourcehaven-BV/rela/internal/store"
+	"github.com/Sourcehaven-BV/rela/internal/visibility"
 )
 
 // redactionMetamodel declares a type with a property a policy can hide.
@@ -381,5 +383,59 @@ assignments:
 		t.Errorf("leaked = %q, want \"NO_SALARY\" — an automation cascade read a "+
 			"`visible:`-hidden value and copied it onto a readable field; cascade "+
 			"reads are ACL-bound to the acting user (DEC-O59WM4)", got)
+	}
+}
+
+// searchIDs runs q through s and returns the hit ids, failing on an error.
+func searchIDs(ctx context.Context, t *testing.T, s search.Searcher, text string) []string {
+	t.Helper()
+	var ids []string
+	for h, err := range s.Search(ctx, search.Query{Text: text}) {
+		if err != nil {
+			t.Fatalf("Search(%q): %v", text, err)
+		}
+		ids = append(ids, h.ID)
+	}
+	return ids
+}
+
+// TestGatedReads_SearchDropsHiddenFieldMatch (TKT-4QSZ8Y): the remote MCP
+// search goes through GatedReads, so a match on a `visible:`-hidden value must
+// not confirm that value. A match on a visible property still finds the row,
+// which proves the drop is field-level rather than the whole type going dark.
+func TestGatedReads_SearchDropsHiddenFieldMatch(t *testing.T) {
+	root := writeRedactionProject(t)
+	svc, err := appbuildOnDisk(t, root)
+	if err != nil {
+		t.Fatalf("appbuild.New: %v", err)
+	}
+	defer svc.Close()
+
+	s := svc.GatedReads().Searcher
+	if _, ok := s.(*visibility.Searcher); !ok {
+		t.Fatalf("GatedReads().Searcher = %T, want *visibility.Searcher", s)
+	}
+	ctx := bobCtx(principal.ToolMCP)
+	if got := searchIDs(ctx, t, s, "Alice"); len(got) != 1 || got[0] != "PERS-1" {
+		t.Errorf("search on a visible value = %v, want [PERS-1]", got)
+	}
+	if got := searchIDs(ctx, t, s, "99000"); len(got) != 0 {
+		t.Errorf("search on the hidden salary = %v, want no hits — the hit confirms the value", got)
+	}
+}
+
+// TestNoPolicy_GatedSearcherIsRaw pins NopACL parity for search: with no
+// acl.yaml, GatedReads hands out the raw searcher unchanged.
+func TestNoPolicy_GatedSearcherIsRaw(t *testing.T) {
+	root := t.TempDir()
+	writeMetamodelBody(t, root, redactionMetamodel)
+	svc, err := appbuildOnDisk(t, root)
+	if err != nil {
+		t.Fatalf("appbuild.New: %v", err)
+	}
+	defer svc.Close()
+
+	if got, want := svc.GatedReads().Searcher, svc.Searcher(); got != want {
+		t.Errorf("GatedReads().Searcher = %T, want the raw searcher %T", got, want)
 	}
 }

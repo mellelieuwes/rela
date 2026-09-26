@@ -92,7 +92,7 @@ data, because every read goes to the store.
 |------|-------------|------------|
 | `list_entities` | List entities with optional filtering | `type?`, `where?`, `limit?`, `offset?` |
 | `show_entity` | Get full entity details with relations | `id` |
-| `search_entities` | Full-text search across entities | `query`, `type?`, `limit?` |
+| `search_entities` | Full-text search across entities. Each hit has `id`, `type`, `title`, `status`, and `face` for a faced entity | `query`, `type?`, `limit?` |
 | `create_entity` | Create a new entity | `type`, `properties`, `content?`, `id?` |
 | `update_entity` | Update entity properties or content | `id`, `properties?`, `content?` |
 | `delete_entity` | Delete an entity and its relations | `id`, `cascade?` |
@@ -311,7 +311,13 @@ gets through the web UI:
   hitting the same endpoint see different rows.
 - Every write is authorized and audited as the **requesting** principal, with
   `principal.tool: "mcp"`.
-- A denied entity is indistinguishable from a nonexistent one.
+- A denied entity is indistinguishable from a nonexistent one. This holds
+  for writes too: a write naming an id you cannot read fails with the same
+  "not found" error as an id that does not exist.
+- `search_entities` returns only entities you may read, and drops a hit that
+  matched only on a property hidden from you.
+- `lua_eval` and `lua_run` read through the same gate. `rela.bypass_acl` is
+  not available, and a write returns the entity as you are allowed to see it.
 
 Note the current scope: **every tool is exposed remotely**, including
 `lua_eval` and `lua_run`. Those run in a sandboxed interpreter with no OS

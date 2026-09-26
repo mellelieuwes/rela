@@ -630,9 +630,9 @@ must never reach a client class, do not write a scope grant naming it.
   The same trust boundary as asserted roles, enforced by the type
   system. See GUIDE-acl-security.
 - **stdio MCP is not covered.** It has no authentication at all, so
-  there is no verified claim to key on. This makes the *policy*
-  expressible; wiring `internal/mcp` through the read gate is
-  TKT-G3PPD.
+  there is no verified claim to key on. The remote endpoint
+  (`rela-server -mcp`) carries a verified JWT, so a ceiling applies
+  there.
 - **`Tool` is not a selector.** rela stamps it (`mcp`, `cli`,
   `data-entry`), but the entry-point binary asserts it rather than an
   IdP signing it. Mixing a spoofable key with signed claims in one

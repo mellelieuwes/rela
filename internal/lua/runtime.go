@@ -29,6 +29,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/search"
 	"github.com/Sourcehaven-BV/rela/internal/store"
 	"github.com/Sourcehaven-BV/rela/internal/tracer"
+	"github.com/Sourcehaven-BV/rela/internal/visibility"
 )
 
 // Default values for Lua API functions.
@@ -385,7 +386,9 @@ func WithMailSender(s MailSender) Option {
 // rather than sharing a nameless namespace.
 func WithCache(c *Cache) Option {
 	return func(r *Runtime) {
-		r.cache = c
+		if c != nil { // a typed nil in the interface would register the bindings
+			r.cache = c
+		}
 	}
 }
 
@@ -1709,8 +1712,8 @@ func (r *Runtime) luaSearch(ls *lua.LState) int {
 		// Fetch the full entity for the lua table (search hits are minimal).
 		// This hydration is ALSO the gate: hits the caller may not read fail
 		// here and are skipped, so no hidden entity or property reaches the
-		// script. The hit LIST itself is un-gated — see ReadDeps.Searcher for
-		// the residual (TKT-GGQ0JT class).
+		// script. Whether the hit list itself is gated depends on the wiring;
+		// see ReadDeps.Searcher.
 		e, err := rd.GetEntity(ctx, hit.ID)
 		if err != nil {
 			// A denied hit arrives as ErrNotFound and is skipped silently —
@@ -1776,16 +1779,71 @@ func (r *Runtime) luaCreateEntity(ls *lua.LState) int {
 		Properties: props,
 		Content:    content,
 	}
+	ctx := r.callerCtx()
 	result, err := r.deps.EntityManager.CreateEntity(
-		r.callerCtx(), newE, entity.CreateOptions{ID: customID, Face: opts.Face})
+		ctx, newE, entity.CreateOptions{ID: customID, Face: opts.Face})
 	if err != nil {
 		ls.RaiseError("create entity error: %s", err.Error())
 		return 0
 	}
 
-	ls.Push(EntityToTable(ls, result.Entity))
+	ls.Push(writtenEntityTable(ctx, ls, r.deps.VisibleReader, result.Entity))
 	ls.Push(WarningsToTable(ls, result.Warnings))
 	return 2
+}
+
+// writtenEntityTable returns the entity a write produced, as the caller may
+// read it. The manager's result is built from a raw read, so returning it
+// as-is would hand the script properties its reader hides. The entity is read
+// again through VisibleReader instead. When the caller cannot read it at all,
+// only its id and type are returned: the caller named or created it, so those
+// disclose nothing. Any other read error, and a missing reader, raise.
+func writtenEntityTable(ctx context.Context, ls *lua.LState, rd EntityReader, written *entity.Entity) *lua.LTable {
+	if rd == nil {
+		ls.RaiseError("no reader is configured for this runtime")
+		return nil
+	}
+	e, err := readFace(ctx, rd, written.ID, written.Face)
+	switch {
+	case err == nil:
+		return EntityToTable(ls, e)
+	case errors.Is(err, store.ErrNotFound):
+		return EntityToTable(ls, &entity.Entity{ID: written.ID, Type: written.Type, Face: written.Face})
+	default:
+		ls.RaiseError("read back %s: %v", written.ID, err)
+		return nil
+	}
+}
+
+// readFace reads one face of id through rd.
+func readFace(ctx context.Context, rd EntityReader, id string, face entity.Face) (*entity.Entity, error) {
+	if face.IsDefault() {
+		return rd.GetEntity(ctx, id)
+	}
+	for e, err := range rd.ListEntities(ctx, store.EntityQuery{IDs: []string{id}, FaceIn: []entity.Face{face}}) {
+		if err != nil {
+			return nil, err
+		}
+		if e != nil && e.ID == id {
+			return e, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+// gateWriteTarget raises "entity not found" unless the caller may read every
+// id a write names. The manager answers "forbidden" for an entity that exists
+// but is hidden and "not found" for a missing one, so without this a script
+// could probe for hidden ids. This matches the data-entry write path, which
+// also reads the target through the gated reader first.
+func gateWriteTarget(ctx context.Context, ls *lua.LState, rd EntityReader, ids ...string) bool {
+	for _, id := range ids {
+		if !visibility.Readable(ctx, rd, id) {
+			ls.RaiseError("entity not found: %s", id)
+			return false
+		}
+	}
+	return true
 }
 
 // luaUpdateEntity implements rela.update_entity(id, properties, content?) -> (entity, warnings).
@@ -1825,6 +1883,10 @@ func (r *Runtime) luaUpdateEntity(ls *lua.LState) int {
 		patch.Content = &content
 	}
 
+	if rd, ok := r.reader(ls, "rela.update_entity"); !ok || !gateWriteTarget(ctx, ls, rd, id) {
+		return 0
+	}
+
 	result, err := r.deps.EntityManager.PatchEntity(ctx, id, patch)
 	if err != nil {
 		// Preserve the pre-TKT-80EWGM message for a missing entity: scripts
@@ -1839,7 +1901,7 @@ func (r *Runtime) luaUpdateEntity(ls *lua.LState) int {
 		return 0
 	}
 
-	ls.Push(EntityToTable(ls, result.Entity))
+	ls.Push(writtenEntityTable(ctx, ls, r.deps.VisibleReader, result.Entity))
 	ls.Push(WarningsToTable(ls, result.Warnings))
 	return 2
 }
@@ -1920,7 +1982,11 @@ func (r *Runtime) luaDeleteEntity(ls *lua.LState) int {
 
 	cascade := ls.OptBool(2, false)
 
-	if _, err := r.deps.EntityManager.DeleteEntity(r.callerCtx(), id, cascade); err != nil {
+	ctx := r.callerCtx()
+	if rd, ok := r.reader(ls, "rela.delete_entity"); !ok || !gateWriteTarget(ctx, ls, rd, id) {
+		return 0
+	}
+	if _, err := r.deps.EntityManager.DeleteEntity(ctx, id, cascade); err != nil {
 		ls.RaiseError("delete entity error: %s", err.Error())
 		return 0
 	}
@@ -1956,8 +2022,12 @@ func (r *Runtime) luaCreateRelation(ls *lua.LState) int {
 		return 0
 	}
 
+	ctx := r.callerCtx()
+	if rd, ok := r.reader(ls, "rela.create_relation"); !ok || !gateWriteTarget(ctx, ls, rd, from, to) {
+		return 0
+	}
 	rel, err := r.deps.EntityManager.CreateRelation(
-		r.callerCtx(), from, relType, to,
+		ctx, from, relType, to,
 		entity.RelationOptions{FromFace: opts.Face, Content: opts.Content})
 	if err != nil {
 		ls.RaiseError("create relation error: %s", err.Error())
@@ -1979,7 +2049,11 @@ func (r *Runtime) luaDeleteRelation(ls *lua.LState) int {
 		return 0
 	}
 
-	if err := r.deps.EntityManager.DeleteRelation(r.callerCtx(), from, relType, to); err != nil {
+	ctx := r.callerCtx()
+	if rd, ok := r.reader(ls, "rela.delete_relation"); !ok || !gateWriteTarget(ctx, ls, rd, from, to) {
+		return 0
+	}
+	if err := r.deps.EntityManager.DeleteRelation(ctx, from, relType, to); err != nil {
 		ls.RaiseError("delete relation error: %s", err.Error())
 		return 0
 	}

@@ -605,7 +605,8 @@ func (s *Services) ScheduledLuaWriteDeps() lua.WriteDeps {
 // (the field-level half of TKT-3FL2S6).
 //
 // SCOPE: field redaction covers entity properties only. Relation meta is NOT
-// redacted here — [gatedGraphReader.GetRelation] reads raw, and relation-level
+// redacted here — [gatedGraphReader.GetRelation] returns the raw edge once both
+// endpoints pass the row gate, and relation-level
 // `visible:` grants (acl.RelationGrant.Visible, honored on the dataentry wire
 // via affordances.RelationFieldVerdicts) are not consulted. Relations are gated
 // at the ROW level on both endpoints; their properties are not. Do not read the
@@ -620,21 +621,67 @@ func (s *Services) GatedReads() GatedReadBundle {
 	deps := s.LuaReadDeps()
 	deps.VisibleReader = reader
 	deps.Tracer = tr
+	deps.Searcher = gatedSearcher(s.searcher, s.visibleSearcher, s.aclDeclarative, s.fieldRedactor, s.meta)
 
 	return GatedReadBundle{
-		Reader:    gatedGraphReader{rows: reader, raw: s.store},
+		Reader: gatedGraphReader{
+			rows: reader, raw: s.store, gateEndpoints: s.aclDeclarative != nil,
+		},
 		Tracer:    tr,
 		Validator: newValidator(reader, s.meta, deps, gate, s.store),
+		Searcher:  deps.Searcher,
+		LuaReads:  deps,
 	}
 }
 
-// GatedReadBundle is the result of [Services.GatedReads]: the three read
-// handles an identity-bearing consumer needs, each ACL-bound to the ctx
-// principal at call time.
+// GatedReadBundle is the result of [Services.GatedReads]: the read handles an
+// identity-bearing consumer needs, each ACL-bound to the ctx principal at call
+// time.
 type GatedReadBundle struct {
 	Reader    GatedGraphReader
 	Tracer    tracer.Tracer
 	Validator validator.Validator
+
+	// Searcher gates hits by the principal's read scope, drops hits that
+	// matched only hidden properties, and clears the indexed title (see
+	// [visibility.Searcher]). Take titles from Reader.
+	Searcher search.Searcher
+
+	// LuaReads is the Lua read bundle over the same gated reader, tracer and
+	// searcher. It grants no capabilities and holds no elevated handle; a
+	// writer runtime pairs it with an EntityManager.
+	LuaReads lua.ReadDeps
+}
+
+// gatedSearcher returns the search handle for an identity-bearing consumer.
+// Under NopACL it is the raw searcher (byte-identical to pre-ACL behavior). A
+// construction failure REFUSES via [visibility.DenySearcher] rather than
+// degrading to raw hits (RR-GKCZO5).
+func gatedSearcher(
+	raw search.Searcher, vs search.VisibleSearcher, d *acl.Declarative,
+	redactor visibility.FieldRedactor, meta *metamodel.Metamodel,
+) search.Searcher {
+	if d == nil {
+		return raw
+	}
+	if redactor == nil {
+		redactor = visibility.NopRedactor{}
+	}
+	gate, err := visibility.NewDeclarativeGate(d)
+	if err != nil {
+		slog.Error("appbuild: ACL gate unavailable; search REFUSED", "err", err)
+		return visibility.DenySearcher{}
+	}
+	types := make([]string, 0, len(meta.Entities))
+	for name := range meta.Entities {
+		types = append(types, name)
+	}
+	gs, err := visibility.NewSearcher(vs, gate, redactor, types)
+	if err != nil {
+		slog.Error("appbuild: gated searcher unavailable; search REFUSED", "err", err)
+		return visibility.DenySearcher{}
+	}
+	return gs
 }
 
 // GatedGraphReader is the row-and-tally read surface returned by
@@ -661,19 +708,22 @@ type GatedGraphReader interface {
 //     STRUCTURAL: it says how many rows of a declared type exist, never which.
 //     Entity *existence* is the secret the row gate protects; an aggregate
 //     tally of a type the metamodel already publishes is not.
-//   - GetRelation goes to the raw store because a relation is addressed by its
-//     two endpoint ids, which the caller must already hold. Reading one
-//     therefore confirms nothing about entities the caller could not already
-//     name. That argument is about ROW-level exposure (whether the edge
-//     exists) and does not extend to the edge's meta VALUES: relations carry
-//     no field-level redaction on this path today (see docs/acl-security.md
-//     and TKT-0RBFN0), so this matches what a live relation GET exposes only
-//     until that ticket lands.
+//   - GetRelation answers not-found unless both endpoints pass the row gate,
+//     then reads the raw store. Holding two ids is not the same as being
+//     allowed to read them: without the endpoint check, a caller could learn
+//     that a hidden entity exists and is linked (TKT-4QSZ8Y). The edge's meta
+//     VALUES are not redacted: relations carry no field-level redaction on
+//     this path today (see docs/acl-security.md and TKT-0RBFN0).
 //
 // If either judgement changes, this is the one type to fix.
 type gatedGraphReader struct {
 	rows lua.EntityReader
 	raw  store.Store
+
+	// gateEndpoints requires both endpoints of a GetRelation to be readable.
+	// Off under NopACL, where every entity is readable and a dangling edge
+	// must stay readable as before.
+	gateEndpoints bool
 }
 
 func (g gatedGraphReader) GetEntity(ctx context.Context, id string) (*entity.Entity, error) {
@@ -695,6 +745,9 @@ func (g gatedGraphReader) ListRelations(
 func (g gatedGraphReader) GetRelation(
 	ctx context.Context, from, relType, to string,
 ) (*entity.Relation, error) {
+	if g.gateEndpoints && (!visibility.Readable(ctx, g.rows, from) || !visibility.Readable(ctx, g.rows, to)) {
+		return nil, store.ErrNotFound
+	}
 	return g.raw.GetRelation(ctx, from, relType, to)
 }
 

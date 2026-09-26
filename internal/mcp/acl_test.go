@@ -14,6 +14,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/appbuild/appbuildtest"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
 	"github.com/Sourcehaven-BV/rela/internal/entity"
+	"github.com/Sourcehaven-BV/rela/internal/lua"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 	"github.com/Sourcehaven-BV/rela/internal/store"
@@ -83,8 +84,12 @@ func gatedServer(t *testing.T) (*Server, context.Context) {
 	}
 
 	d, err := acl.NewDeclarative(&acl.Policy{
-		Roles:       map[string]acl.RoleDef{"viewer": {Read: []string{"ticket"}}},
-		Assignments: map[string]string{"alice": "viewer"},
+		Roles: map[string]acl.RoleDef{
+			"viewer": {Read: []string{"ticket"}},
+			// editor may change tickets but, like viewer, not read features.
+			"editor": {Read: []string{"ticket"}, Update: []string{"ticket"}, Delete: []string{"ticket"}},
+		},
+		Assignments: map[string]string{"alice": "viewer", "carol": "editor"},
 	}, acl.NewStoreGraph(st), st)
 	if err != nil {
 		t.Fatalf("acl.NewDeclarative: %v", err)
@@ -101,11 +106,11 @@ func gatedServer(t *testing.T) (*Server, context.Context) {
 		Store:         reads.Reader,
 		Meta:          meta,
 		Tracer:        reads.Tracer,
-		Searcher:      svc.Searcher(),
+		Searcher:      reads.Searcher,
 		Validator:     reads.Validator,
 		EntityManager: svc.EntityManager(),
 		Config:        svc.Config(),
-		LuaWriteDeps:  svc.LuaWriteDeps(),
+		LuaWriteDeps:  lua.WriteDeps{ReadDeps: reads.LuaReads, EntityManager: svc.EntityManager()},
 		Watcher:       nopWatcher{},
 		ProjectRoot:   t.TempDir(),
 		Attachments:   testAttachmentDeps(t, svc, meta, audit.Nop{}),
@@ -387,3 +392,192 @@ func TestACL_Trace_HiddenRootIsNotAnOracle(t *testing.T) {
 // norm replaces the caller-supplied id with a placeholder so two responses
 // that differ only by that id compare equal.
 func norm(s, id string) string { return strings.ReplaceAll(s, id, "<ID>") }
+
+// TestACL_SearchEntities_OmitsHidden pins the search tool. The raw index holds
+// the hidden feature, so only the gated searcher keeps it out.
+func TestACL_SearchEntities_OmitsHidden(t *testing.T) {
+	t.Parallel()
+	s, ctx := gatedServer(t)
+
+	hidden, err := s.handleSearchEntities(ctx, makeToolRequest(map[string]any{"query": "classified"}))
+	if err != nil {
+		t.Fatalf("search_entities(hidden): %v", err)
+	}
+	if text := getResultText(t, hidden); strings.Contains(text, hiddenID) || strings.Contains(text, hiddenTitle) {
+		t.Errorf("LEAK: hidden entity in search_entities: %s", text)
+	}
+
+	visible, err := s.handleSearchEntities(ctx, makeToolRequest(map[string]any{"query": "visible"}))
+	if err != nil {
+		t.Fatalf("search_entities(visible): %v", err)
+	}
+	text := getResultText(t, visible)
+	if !strings.Contains(text, visibleID) || !strings.Contains(text, "visible ticket") {
+		t.Errorf("expected the readable ticket with its title, got: %s", text)
+	}
+}
+
+// TestACL_RelationReads_HiddenEndpointIsNotFound pins the relation resource
+// and delete_relation. Both address an edge by its endpoint ids, and a hidden
+// endpoint must answer like a missing edge.
+func TestACL_RelationReads_HiddenEndpointIsNotFound(t *testing.T) {
+	t.Parallel()
+	s, ctx := gatedServer(t)
+
+	_, err := group(s, selSchemaRes).handleReadRelation(ctx,
+		readResourceReq("rela://relation/"+visibleID+"/relates-to/"+hiddenID))
+	if err == nil {
+		t.Error("LEAK: relation resource with a hidden endpoint succeeded")
+	}
+
+	hidden, err := s.handleDeleteRelation(ctx, makeToolRequest(map[string]any{
+		"from": visibleID, "type": "relates-to", "to": hiddenID,
+	}))
+	if err != nil {
+		t.Fatalf("delete_relation(hidden): %v", err)
+	}
+	absent, err := s.handleDeleteRelation(ctx, makeToolRequest(map[string]any{
+		"from": visibleID, "type": "relates-to", "to": "NO-SUCH-ID",
+	}))
+	if err != nil {
+		t.Fatalf("delete_relation(absent): %v", err)
+	}
+	if !isErrorResult(hidden) {
+		t.Fatalf("delete_relation with a hidden endpoint succeeded: %s", getResultText(t, hidden))
+	}
+	if norm(getResultText(t, hidden), hiddenID) != norm(getResultText(t, absent), "NO-SUCH-ID") {
+		t.Errorf("hidden and absent endpoints distinguishable:\n hidden: %s\n absent: %s",
+			getResultText(t, hidden), getResultText(t, absent))
+	}
+}
+
+// TestACL_Writes_HiddenIdIsIndistinguishableFromAbsent pins the write tools
+// that name an id without reading it first. The write path answers
+// "forbidden" for a hidden entity and "not found" for a missing one.
+func TestACL_Writes_HiddenIdIsIndistinguishableFromAbsent(t *testing.T) {
+	t.Parallel()
+	s, ctx := gatedServer(t)
+
+	tests := []struct {
+		name string
+		call func(id string) (*mcpgo.CallToolResult, error)
+	}{
+		{"rename_entity dry run", func(id string) (*mcpgo.CallToolResult, error) {
+			return s.handleRenameEntity(ctx, makeToolRequest(map[string]any{
+				"id": id, "new_id": "FEAT-NEW", "dry_run": true,
+			}))
+		}},
+		{"create_relation target", func(id string) (*mcpgo.CallToolResult, error) {
+			return s.handleCreateRelation(ctx, makeToolRequest(map[string]any{
+				"from": visibleID, "type": "relates-to", "to": id,
+			}))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hidden, err := tc.call(hiddenID)
+			if err != nil {
+				t.Fatalf("hidden: %v", err)
+			}
+			absent, err := tc.call("NO-SUCH-ID")
+			if err != nil {
+				t.Fatalf("absent: %v", err)
+			}
+			if !isErrorResult(hidden) {
+				t.Fatalf("write naming a hidden id succeeded: %s", getResultText(t, hidden))
+			}
+			if norm(getResultText(t, hidden), hiddenID) != norm(getResultText(t, absent), "NO-SUCH-ID") {
+				t.Errorf("hidden and absent distinguishable:\n hidden: %s\n absent: %s",
+					getResultText(t, hidden), getResultText(t, absent))
+			}
+		})
+	}
+}
+
+// TestACL_LuaEval_ReadsAreGated pins the Lua tools. Before TKT-4QSZ8Y the
+// runtime read through visibility.Unrestricted, so a remote caller could read
+// the whole graph from lua_eval.
+func TestACL_LuaEval_ReadsAreGated(t *testing.T) {
+	t.Parallel()
+	s, ctx := gatedServer(t)
+
+	code := `rela.output({
+		hidden = rela.get_entity("` + hiddenID + `"),
+		visible = rela.get_entity("` + visibleID + `"),
+		features = rela.list_entities("feature"),
+		found = rela.search("classified"),
+		trace = rela.trace_from("` + visibleID + `"),
+	})`
+	res, err := group(s, selLua).handleLuaEval(ctx, makeToolRequest(map[string]any{"code": code}))
+	if err != nil {
+		t.Fatalf("lua_eval: %v", err)
+	}
+	text := getResultText(t, res)
+	if isErrorResult(res) {
+		t.Fatalf("lua_eval failed: %s", text)
+	}
+	if strings.Contains(text, hiddenID) || strings.Contains(text, hiddenTitle) {
+		t.Errorf("LEAK: hidden entity reached lua_eval: %s", text)
+	}
+	if !strings.Contains(text, "visible ticket") {
+		t.Errorf("readable ticket missing, so the test proves nothing: %s", text)
+	}
+}
+
+// TestACL_LuaEval_WritesNamingHiddenIds pins the Lua write bindings, which
+// otherwise answer "forbidden" for a hidden id and "not found" for a missing
+// one.
+func TestACL_LuaEval_WritesNamingHiddenIds(t *testing.T) {
+	t.Parallel()
+	s, ctx := gatedServer(t)
+
+	for _, call := range []string{
+		`rela.update_entity("%s", {title = "x"})`,
+		`rela.delete_entity("%s")`,
+		`rela.create_relation("` + visibleID + `", "relates-to", "%s")`,
+	} {
+		run := func(id string) string {
+			code := strings.ReplaceAll(call, "%s", id)
+			res, err := group(s, selLua).handleLuaEval(ctx, makeToolRequest(map[string]any{"code": code}))
+			if err != nil {
+				t.Fatalf("lua_eval(%s): %v", code, err)
+			}
+			if !isErrorResult(res) {
+				t.Fatalf("lua_eval(%s) succeeded: %s", code, getResultText(t, res))
+			}
+			return getResultText(t, res)
+		}
+		hidden, absent := run(hiddenID), run("NO-SUCH-ID")
+		if norm(hidden, hiddenID) != norm(absent, "NO-SUCH-ID") {
+			t.Errorf("%s: hidden and absent distinguishable:\n hidden: %s\n absent: %s", call, hidden, absent)
+		}
+	}
+}
+
+// TestACL_WriteCounts_OmitHiddenEdges (RR-MEXNEZ): the relation counts that
+// rename and delete report cover visible edges only. The fixture's visible
+// ticket has one edge, to the hidden feature, so a raw count would say 1.
+func TestACL_WriteCounts_OmitHiddenEdges(t *testing.T) {
+	t.Parallel()
+	s, _ := gatedServer(t)
+	ctx := principal.With(context.Background(), principal.Principal{User: "carol", Tool: principal.ToolMCP})
+
+	res, err := s.handleRenameEntity(ctx, makeToolRequest(map[string]any{
+		"id": visibleID, "new_id": "TKT-NEW", "dry_run": true,
+	}))
+	if err != nil || isErrorResult(res) {
+		t.Fatalf("rename dry run: %v %s", err, getResultText(t, res))
+	}
+	if got := getResultText(t, res); !strings.Contains(got, "(0 relations updated)") {
+		t.Errorf("rename reports the hidden edge: %s", got)
+	}
+
+	res, err = s.handleDeleteEntity(ctx, makeToolRequest(map[string]any{"id": visibleID, "cascade": true}))
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := getResultText(t, res); got != "Deleted "+visibleID {
+		t.Errorf("delete reply = %q, want no relation count", got)
+	}
+}

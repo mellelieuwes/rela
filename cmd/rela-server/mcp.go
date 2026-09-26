@@ -8,6 +8,7 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/appbuild"
 	"github.com/Sourcehaven-BV/rela/internal/dataentry"
+	"github.com/Sourcehaven-BV/rela/internal/lua"
 	relamcp "github.com/Sourcehaven-BV/rela/internal/mcp"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 )
@@ -68,8 +69,9 @@ func wireIdentityAndMCP(app *dataentry.App, svc *appbuild.Services, f *serverFla
 // placeholder, so an unattributed write is recorded as the server itself
 // rather than as a guessed user.
 //
-// **Reads are ACL-gated.** The read handles come from
-// [appbuild.Services.GatedReads], which resolves the ctx principal per call.
+// **Reads are ACL-gated.** Every read handle comes from
+// [appbuild.Services.GatedReads] via [remoteMCPDeps], which resolves the ctx
+// principal per call.
 // This is the opposite of the stdio wiring's deliberate NopACL: there the
 // filesystem is the trust boundary (anyone who can run `rela mcp` can edit
 // the files directly), so a gate would defend nothing. A remote caller has no
@@ -80,24 +82,7 @@ func wireRemoteMCP(app *dataentry.App, svc *appbuild.Services, f *serverFlags) e
 	}
 
 	factory := func(host dataentry.MCPHost) (http.Handler, error) {
-		reads := svc.GatedReads()
-
-		deps := relamcp.Deps{
-			Store:         reads.Reader,
-			Meta:          svc.Meta(),
-			Tracer:        reads.Tracer,
-			Searcher:      svc.Searcher(),
-			Validator:     reads.Validator,
-			EntityManager: svc.EntityManager(),
-			Config:        svc.Config(),
-			LuaWriteDeps:  svc.LuaWriteDeps(),
-			LuaCache:      svc.ScriptEngine().LuaCache(),
-			Watcher:       noopWatcher{},
-			ProjectRoot:   svc.Paths().Root,
-			Attachments:   remoteAttachmentDeps(svc, host),
-		}
-
-		srv, err := relamcp.NewServer(deps, mcpServerVersion,
+		srv, err := relamcp.NewServer(remoteMCPDeps(svc, host), mcpServerVersion,
 			relamcp.WithPrincipal(principal.Principal{
 				User: principal.SystemUser(),
 				Tool: principal.ToolMCP,
@@ -127,6 +112,34 @@ func remoteAttachmentDeps(svc *appbuild.Services, host dataentry.MCPHost) relamc
 		Authorizer: svc.ACL(),
 		Audit:      svc.Audit(),
 		WriteLock:  host.WriteLock,
+	}
+}
+
+// remoteMCPDeps builds the MCP dependencies for the remote endpoint. Every
+// read handle, including search and the Lua tools' reads, comes from
+// [appbuild.Services.GatedReads]. The Lua tools get no elevated handle, so a
+// remote caller cannot use rela.bypass_acl.
+//
+// LuaCache is nil on purpose. The script engine's cache is shared with
+// data-entry and keyed by script path, not by principal, so a memoized gated
+// read by one caller would be served to the next.
+func remoteMCPDeps(svc *appbuild.Services, host dataentry.MCPHost) relamcp.Deps {
+	reads := svc.GatedReads()
+	return relamcp.Deps{
+		Store:         reads.Reader,
+		Meta:          svc.Meta(),
+		Tracer:        reads.Tracer,
+		Searcher:      reads.Searcher,
+		Validator:     reads.Validator,
+		EntityManager: svc.EntityManager(),
+		Config:        svc.Config(),
+		LuaWriteDeps: lua.WriteDeps{
+			ReadDeps:      reads.LuaReads,
+			EntityManager: svc.EntityManager(),
+		},
+		Watcher:     noopWatcher{},
+		ProjectRoot: svc.Paths().Root,
+		Attachments: remoteAttachmentDeps(svc, host),
 	}
 }
 

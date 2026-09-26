@@ -641,8 +641,9 @@ than the lens.
 ### Not a substitute for gating the client itself
 
 stdio MCP has no authentication, so no verified claim exists to key a
-baseline on, and its read path does not yet route through the ACL read
-gate at all (TKT-G3PPD). Client attenuation makes the *policy*
+baseline on, and its read path does not route through the ACL read
+gate: it runs with the operator's own access. The remote endpoint
+(`rela-server -mcp`) is gated. Client attenuation makes the *policy*
 expressible; it does not by itself restrict a locally-launched
 `rela mcp`.
 
@@ -1206,11 +1207,25 @@ other surfaces and how each counts hidden entities.
   neighbor-disclosure analysis (a visible neighbor's id confirms a
   visible entity, but gap analysis around hidden entities needs its
   own treatment).
-- **MCP transport** — tracked as TKT-G3PPD. MCP read tools
-  (`show_entity`, `list_entities`, `search_entities`, trace) apply
-  neither the entity-level read gate nor `visible:` redaction; they
-  return full entity bodies. The MCP server is local-only (stdio), so
-  this is an accepted gap at this stage.
+- **Local stdio MCP (`rela mcp`)** applies no ACL. It has no
+  authentication, so there is no principal to gate for; it runs with the
+  operator's own file access, like the CLI. The **remote** MCP endpoint
+  (`rela-server -mcp`) is JWT-authenticated and gated (TKT-4QSZ8Y): entity
+  and relation reads, `search_entities`, trace, resources and the Lua tools
+  all read through `GatedReads`. Search drops hits that matched only hidden
+  properties, and the Lua tools get no `rela.bypass_acl`. These residuals
+  remain on the remote endpoint:
+  - relation meta values are not field-redacted (TKT-0RBFN0), the same as
+    on every other read path;
+  - a create or rename that picks a new id which a hidden entity already
+    holds fails with a conflict, which confirms that id exists. The
+    data-entry write path has the same property;
+  - `delete_entity` without `cascade` on an entity whose only edges lead
+    to hidden entities fails with "entity has relations". That shows some
+    hidden edge exists, but not how many or to what. The counts that
+    `delete_entity` and `rename_entity` report cover visible edges only;
+  - `analyze_cardinality` and `analyze_orphans` use structural relation
+    counts, the same rule the data-entry analyze view follows.
 - **Markdown body (`content`) is not field-redacted, on any read path.**
   `visible:` is a **property-values** guard: it omits hidden *property* and
   *relation-meta* values from the wire. It makes no claim over the markdown
@@ -1228,7 +1243,7 @@ see above); `visible:` property/meta redaction applies to every data-entry
 HTTP read body — and **sync inherits it by reading through `/api/v1`**
 (TKT-8P1TM7); and `/_search`
 cannot be used as a hidden-field oracle. The remaining read-side gaps are
-the MCP transport (TKT-G3PPD) and the markdown body (never field-redacted,
+relation meta (TKT-0RBFN0) and the markdown body (never field-redacted,
 by design — see above); within the data-entry server every property/meta
 read channel a browser or a replica can reach is tight.
 

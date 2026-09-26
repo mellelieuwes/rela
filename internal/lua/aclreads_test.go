@@ -501,3 +501,55 @@ rela.output("redacted=" .. tostring(p:is_redacted("salary")))
 		t.Errorf("ungated runtime should report nothing redacted: %q", out)
 	}
 }
+
+// TestScriptWrites_ResultIsRedacted (RR-RKBUZU): the table a write returns is
+// read back through the gated reader. The manager hands back the full stored
+// entity, so returning it as-is would give a script every hidden property of
+// any entity it may update.
+func TestScriptWrites_ResultIsRedacted(t *testing.T) {
+	st, deps := newACLWorld(t)
+	deps.EntityManager = &storeMutator{st: st}
+
+	out := runAsAlice(t, deps, `
+local p = rela.update_entity("P-1", {name = "Ann Updated"})
+rela.output("name=" .. tostring(p.properties.name))
+rela.output("salary=" .. tostring(p.properties.salary))
+`)
+	if !strings.Contains(out, "name=Ann Updated") {
+		t.Errorf("granted field missing from write result: %q", out)
+	}
+	if !strings.Contains(out, "salary=nil") {
+		t.Errorf("hidden field leaked through the write result: %q", out)
+	}
+}
+
+// TestScriptWrites_HiddenTargetIsNotFound (RR-T4G0S7): a write naming an
+// entity the caller cannot read fails exactly like one naming an absent id.
+func TestScriptWrites_HiddenTargetIsNotFound(t *testing.T) {
+	st, deps := newACLWorld(t)
+	deps.EntityManager = &storeMutator{st: st}
+
+	run := func(id string) string {
+		var out strings.Builder
+		ctx := principal.With(context.Background(), principal.Principal{
+			User: "alice", Tool: principal.ToolScheduler,
+		})
+		rt := lua.NewWriter(deps, &out, lua.WithContext(ctx), lua.WithPrincipal(principal.From(ctx)))
+		defer rt.Close()
+		err := rt.RunString(`rela.update_entity("` + id + `", {title = "x"})`)
+		if err == nil {
+			t.Fatalf("update_entity(%s) succeeded", id)
+		}
+		return strings.ReplaceAll(err.Error(), id, "ID")
+	}
+	if hidden, absent := run("SEC-1"), run("NOPE-1"); hidden != absent {
+		t.Errorf("hidden and absent are distinguishable:\n hidden: %s\n absent: %s", hidden, absent)
+	}
+	after, err := st.GetEntity(context.Background(), "SEC-1")
+	if err != nil {
+		t.Fatalf("load SEC-1: %v", err)
+	}
+	if after.Properties["title"] != "Classified" {
+		t.Errorf("hidden entity was written: %v", after.Properties)
+	}
+}

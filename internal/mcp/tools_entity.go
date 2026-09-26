@@ -15,6 +15,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/natsort"
 	"github.com/Sourcehaven-BV/rela/internal/search"
 	"github.com/Sourcehaven-BV/rela/internal/store"
+	"github.com/Sourcehaven-BV/rela/internal/visibility"
 )
 
 func (s *Server) handleListEntities(
@@ -115,22 +116,16 @@ func (s *Server) handleSearchEntities(
 		q.Types = []string{group(s, selTypes).resolveType(entityType)}
 	}
 
-	st := s.deps().Store
-	summaries := make([]map[string]any, 0)
+	var hits []search.Hit
 	for hit, searchErr := range s.deps().Searcher.Search(ctx, q) {
 		if searchErr != nil {
 			return errorResult(fmt.Sprintf("search failed: %v", searchErr)), nil
 		}
-		summary := map[string]any{"id": hit.ID, "type": hit.Type}
-		if hit.Title != "" {
-			summary["title"] = hit.Title
-		}
-		if e, getErr := st.GetEntity(ctx, hit.ID); getErr == nil {
-			if status := e.GetString("status"); status != "" {
-				summary["status"] = status
-			}
-		}
-		summaries = append(summaries, summary)
+		hits = append(hits, hit)
+	}
+	summaries, err := hydrateHits(ctx, s.deps().Store, hits)
+	if err != nil {
+		return errorResult(fmt.Sprintf("search failed: %v", err)), nil
 	}
 
 	text, err := marshalJSON(summaries)
@@ -139,6 +134,55 @@ func (s *Server) handleSearchEntities(
 		return errorResult(err.Error()), nil
 	}
 	return textResult(text), nil
+}
+
+// hitKey identifies one face of one entity.
+type hitKey struct {
+	id   string
+	face entity.Face
+}
+
+// hydrateHits builds the search summaries from the store, in hit order. The
+// hits are read in ONE query over every face, because a faced type has no
+// default row and a per-hit GetEntity would miss it. A hit the store does not
+// return is dropped. The title comes from the stored entity, which the gated
+// store has redacted, and not from the index, which holds the raw value.
+func hydrateHits(ctx context.Context, st GraphReader, hits []search.Hit) ([]map[string]any, error) {
+	summaries := make([]map[string]any, 0, len(hits))
+	if len(hits) == 0 {
+		return summaries, nil
+	}
+	ids := make([]string, 0, len(hits))
+	for _, h := range hits {
+		ids = append(ids, h.ID)
+	}
+	found := make(map[hitKey]*entity.Entity, len(hits))
+	for e, err := range st.ListEntities(ctx, store.EntityQuery{IDs: ids, AllStates: true}) {
+		if err != nil {
+			return nil, err
+		}
+		if e != nil {
+			found[hitKey{e.ID, e.Face}] = e
+		}
+	}
+	for _, h := range hits {
+		e, ok := found[hitKey{h.ID, h.Face}]
+		if !ok {
+			continue
+		}
+		summary := map[string]any{"id": e.ID, "type": e.Type}
+		if !e.Face.IsDefault() {
+			summary["face"] = e.Face.String()
+		}
+		if title := e.Title(); title != "" {
+			summary["title"] = title
+		}
+		if status := e.GetString("status"); status != "" {
+			summary["status"] = status
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, nil
 }
 
 func (s *Server) handleCreateEntity(
@@ -302,29 +346,26 @@ func (s *Server) handleDeleteEntity(
 	cascade := args.GetBool("cascade", false)
 
 	st := s.deps().Store
-	e, getErr := st.GetEntity(ctx, id)
-	if getErr != nil {
+	if _, getErr := st.GetEntity(ctx, id); getErr != nil {
 		return errorResult("entity not found: " + id), nil
 	}
 
-	// Check for relations (for better error message)
-	if !cascade {
-		n, _ := st.CountRelations(ctx, store.RelationQuery{EntityID: id, Direction: store.DirectionBoth})
-		if n > 0 {
-			return errorResult(
-				fmt.Sprintf("entity %s has %d relation(s); set cascade=true to delete them too", id, n)), nil
-		}
+	// Every count reported here is of the relations the caller can see. The
+	// manager's own counts include edges to hidden entities, so reporting
+	// them would disclose how many hidden neighbors the entity has.
+	visible := visibleRelationCount(ctx, st, id)
+	if !cascade && visible > 0 {
+		return errorResult(
+			fmt.Sprintf("entity %s has %d relation(s); set cascade=true to delete them too", id, visible)), nil
 	}
 
-	result, delErr := s.deps().EntityManager.DeleteEntity(ctx, id, cascade)
-	if delErr != nil {
+	if _, delErr := s.deps().EntityManager.DeleteEntity(ctx, id, cascade); delErr != nil {
 		return errorResult(delErr.Error()), nil
 	}
-	_ = e // kept for the cascade relation-count check above
 
 	msg := "Deleted " + id
-	if cascade && len(result.DeletedRelations) > 0 {
-		msg += fmt.Sprintf(" and %d relation(s)", len(result.DeletedRelations))
+	if cascade && visible > 0 {
+		msg += fmt.Sprintf(" and %d relation(s)", visible)
 	}
 	return textResult(msg), nil
 }
@@ -347,10 +388,19 @@ func (s *Server) handleRenameEntity(
 
 	dryRun := args.GetBool("dry_run", false)
 
+	// Gate the source id first: the write path answers "forbidden" for an
+	// entity that exists but is hidden, which would confirm it exists.
+	if !visibility.Readable(ctx, s.deps().Store, oldID) {
+		return errorResult("entity not found: " + oldID), nil
+	}
+
 	// Pause watcher during rename
 	s.deps().Watcher.Pause()
 	defer s.deps().Watcher.Resume()
 
+	// Counted before the rename and through the gated store; the manager's
+	// RelationsUpdated includes edges to hidden entities.
+	visible := visibleRelationCount(ctx, s.deps().Store, oldID)
 	result, renameErr := s.deps().EntityManager.RenameEntity(
 		ctx, oldID, newID, entity.RenameOptions{DryRun: dryRun})
 	if renameErr != nil {
@@ -362,7 +412,22 @@ func (s *Server) handleRenameEntity(
 		verb = "Dry run — would rename"
 	}
 	return textResult(
-		fmt.Sprintf("%s: %s → %s (%d relations updated)", verb, result.OldID, result.NewID, result.RelationsUpdated)), nil
+		fmt.Sprintf("%s: %s → %s (%d relations updated)", verb, result.OldID, result.NewID, visible)), nil
+}
+
+// visibleRelationCount counts id's relations through st. On the gated store
+// that is the edges whose both endpoints the caller may read. A read error
+// ends the count early: the number is informational, and the write that
+// follows reports its own errors.
+func visibleRelationCount(ctx context.Context, st GraphReader, id string) int {
+	n := 0
+	for _, err := range st.ListRelations(ctx, store.RelationQuery{EntityID: id, Direction: store.DirectionBoth}) {
+		if err != nil {
+			break
+		}
+		n++
+	}
+	return n
 }
 
 // filterStoreEntities applies a where clause to entity.Entity slices.
