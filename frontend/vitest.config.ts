@@ -25,6 +25,19 @@ export default defineConfig({
     environment: 'happy-dom',
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.{test,spec}.{js,ts,vue}', '*.{test,spec}.ts'],
+    // Milkdown's Timer.start() schedules a 3s setTimeout that is never
+    // cleared, even after the timer resolves. When a file finishes sooner,
+    // happy-dom removes its globals and the orphan timeout then calls the
+    // bare removeEventListener. Drop only that error; any other still fails.
+    onUnhandledError(error) {
+      if (
+        error.name === 'ReferenceError' &&
+        error.message === 'removeEventListener is not defined' &&
+        error.stack?.includes('@milkdown/ctx')
+      ) {
+        return false
+      }
+    },
   },
   resolve: {
     alias: {
