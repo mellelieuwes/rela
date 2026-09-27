@@ -21,6 +21,13 @@ import { getErrorMessage } from '@/api/errors'
  * The rendered text either side of the selection goes with it, so the server can
  * tell WHICH occurrence of a repeated quote was meant — without it, "eordend"
  * selected inside "Geordend" resolves to the earlier "Ongeordend".
+ *
+ * # Suggesting a change (TKT-S5C0K3)
+ *
+ * The composer can also propose replacement text. It is pre-filled with the
+ * SOURCE markdown the server mapped the selection to (`source_quote`), never
+ * the rendered selection: the replacement overwrites source, and editing the
+ * rendered form would silently drop any `**` or backtick inside the range.
  */
 const props = defineProps<{
   entityType: string
@@ -54,6 +61,13 @@ const checking = ref(false)
 let checkToken = 0
 const composing = ref(false)
 const body = ref('')
+/** The selection's markdown source, from the anchorability check. */
+const sourceQuote = ref<string | null>(null)
+const suggesting = ref(false)
+const replacement = ref('')
+/** Posted when a suggestion carries no comment text of its own. */
+const DEFAULT_SUGGESTION_BODY = 'Suggested a change.'
+
 const submitting = ref(false)
 const composerRef = useTemplateRef<HTMLTextAreaElement>('composer')
 
@@ -66,6 +80,23 @@ function reset() {
   blockedReason.value = null
   checkToken++
   body.value = ''
+  sourceQuote.value = null
+  suggesting.value = false
+  replacement.value = ''
+}
+
+function toggleSuggesting() {
+  suggesting.value = !suggesting.value
+  // Prefill once; toggling back must not discard what was typed.
+  if (suggesting.value && replacement.value === '' && sourceQuote.value !== null) {
+    replacement.value = sourceQuote.value
+  }
+}
+
+/** A suggestion identical to the source would change nothing. */
+function canSubmit(): boolean {
+  if (suggesting.value) return replacement.value !== sourceQuote.value
+  return body.value.trim() !== ''
 }
 
 /** How much rendered text to send either side of the selection. */
@@ -134,6 +165,7 @@ function onSelectionChange() {
 async function verifySelection() {
   const token = ++checkToken
   blockedReason.value = null
+  sourceQuote.value = null
   checking.value = true
   try {
     const res = await checkAnchorable(
@@ -149,6 +181,9 @@ async function verifySelection() {
     blockedReason.value = res.anchorable
       ? null
       : res.reason || 'This selection cannot be commented on'
+    // Only offered where a replacement would be accepted: one spanning list
+    // items or paragraphs is refused on submit.
+    sourceQuote.value = res.anchorable && res.suggestable ? (res.source_quote ?? null) : null
   } catch {
     // A failed CHECK must not block commenting: the create path validates
     // again, so the worst case is the old behaviour (an error on save).
@@ -165,8 +200,8 @@ async function startComposing() {
 }
 
 async function submit() {
-  const text = body.value.trim()
-  if (!text || submitting.value) return
+  if (!canSubmit() || submitting.value) return
+  const text = body.value.trim() || DEFAULT_SUGGESTION_BODY
   submitting.value = true
   try {
     await addComment(props.entityType, props.entityId, {
@@ -176,6 +211,7 @@ async function submit() {
         quote: quote.value,
         quote_prefix: quotePrefix.value,
         quote_suffix: quoteSuffix.value,
+        ...(suggesting.value ? { replacement: replacement.value } : {}),
       },
       body: text,
     })
@@ -238,21 +274,41 @@ onBeforeUnmount(() => {
 
     <form v-else class="tsc-form" @submit.prevent="submit">
       <blockquote class="tsc-quote">{{ quote }}</blockquote>
+      <label v-if="suggesting" class="tsc-label" for="tsc-replacement">Replace with</label>
+      <textarea
+        v-if="suggesting"
+        id="tsc-replacement"
+        v-model="replacement"
+        class="tsc-input tsc-replacement"
+        rows="3"
+        aria-label="Suggested replacement"
+        @keydown.meta.enter="submit"
+        @keydown.ctrl.enter="submit"
+      />
       <textarea
         ref="composer"
         v-model="body"
         class="tsc-input"
         rows="3"
-        placeholder="Add a comment…"
+        :placeholder="suggesting ? 'Explain the change (optional)…' : 'Add a comment…'"
         aria-label="Comment body"
         @keydown.meta.enter="submit"
         @keydown.ctrl.enter="submit"
       />
       <div class="tsc-actions">
+        <button
+          v-if="sourceQuote !== null"
+          type="button"
+          class="tsc-suggest"
+          :aria-pressed="suggesting"
+          @click="toggleSuggesting"
+        >
+          {{ suggesting ? 'Comment only' : 'Suggest a change' }}
+        </button>
         <span class="tsc-hint">⌘↵ to post</span>
         <button type="button" class="tsc-cancel" @click="reset">Cancel</button>
-        <button type="submit" class="tsc-submit" :disabled="submitting || !body.trim()">
-          {{ submitting ? 'Adding…' : 'Comment' }}
+        <button type="submit" class="tsc-submit" :disabled="submitting || !canSubmit()">
+          {{ submitting ? 'Adding…' : suggesting ? 'Suggest' : 'Comment' }}
         </button>
       </div>
     </form>
@@ -359,6 +415,26 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   margin-top: 7px;
+}
+.tsc-label {
+  display: block;
+  margin-bottom: 3px;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--muted-text);
+}
+.tsc-replacement {
+  margin-bottom: 6px;
+  font-family: var(--font-mono, monospace);
+}
+.tsc-suggest {
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 5px);
+  background: var(--bg-color);
+  color: var(--accent-color);
+  font: 600 var(--font-size-sm) / 1.4 inherit;
+  cursor: pointer;
 }
 .tsc-hint {
   margin-right: auto;

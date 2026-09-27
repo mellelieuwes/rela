@@ -22,6 +22,8 @@ test.describe('Comments', () => {
     for (const c of res?.comments ?? []) {
       await api.deleteComment(TYPE, ID, c.id).catch(() => {});
     }
+    // Accepting a suggestion and moving text both edit the seeded body.
+    await api.setEntityContent('tasks', ID, 'Write unit tests for auth module.\n');
   });
 
   test('comments on a property, and the indicator counts it', async ({ appPage }) => {
@@ -132,5 +134,33 @@ test.describe('Comments', () => {
 
     await expect(comments.highlights()).toHaveCount(1);
     await expect(comments.highlights().first()).toHaveText('unit tests for auth');
+  });
+
+  test('suggests a replacement and accepts it into the body', async ({ appPage, api }) => {
+    const comments = new CommentsPage(appPage);
+    await comments.openEntity(TYPE, ID);
+
+    await comments.selectBodyText('unit tests for auth');
+    await comments.suggestOnSelection('integration tests for auth');
+
+    await comments.openHighlight('unit tests for auth');
+    await expect(comments.threadDiffRemoved()).toHaveText('unit tests for auth');
+    await expect(comments.threadDiffAdded()).toHaveText('integration tests for auth');
+
+    await comments.acceptInThread();
+
+    // The body is rewritten on the server and shown without a reload, and
+    // accepting resolves the suggestion.
+    await expect(comments.entityBody()).toContainText(
+      'Write integration tests for auth module.',
+    );
+    const res = await api.listComments(TYPE, ID);
+    expect(res.comments.map((c) => c.resolved)).toEqual([true]);
+
+    // A reload proves it was stored, not only patched into the view.
+    await comments.openEntity(TYPE, ID);
+    await expect(comments.entityBody()).toContainText(
+      'Write integration tests for auth module.',
+    );
   });
 });

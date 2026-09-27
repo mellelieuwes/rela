@@ -1191,7 +1191,7 @@ func NewApp(
 	// commentsHandler owns the commentary routes, likewise extracted to keep
 	// App under its method cap. Built unconditionally: the SERVICE it wraps is
 	// installed later by SetComments and stays nil when commenting is off.
-	app.comments = newCommentsHandler(app)
+	app.comments = newCommentsHandler(app, em)
 
 	// attachmentHandler owns the entity-attachment routes. Constructed after
 	// the runner wiring above so it captures the resolved runner. The acl/

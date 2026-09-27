@@ -4,6 +4,7 @@ import { useUIStore } from '@/stores'
 import { useConfirm } from '@/composables/useConfirm'
 import { addComment, updateComment, deleteComment, type Comment } from '@/api/comments'
 import { getErrorMessage } from '@/api/errors'
+import SuggestionDiff from './SuggestionDiff.vue'
 
 /**
  * The thread for a text-anchored comment, opened by clicking its highlight
@@ -20,9 +21,17 @@ const props = defineProps<{
   comments: Comment[]
   /** Placement in coordinates relative to the body element. */
   position: { top: number; left: number }
+  /**
+   * Whether this user may apply suggestions right now: the entity's
+   * `_actions.update`, and no other body write in flight. Combined with each
+   * comment's own `acceptable` hint.
+   */
+  canAccept?: boolean
 }>()
 
-const emit = defineEmits<{ changed: []; close: [] }>()
+// `accept` goes to the parent rather than being handled here: the parent owns
+// the body's pending writes, which must settle before the accept is sent.
+const emit = defineEmits<{ changed: []; close: []; accept: [comment: Comment] }>()
 
 const uiStore = useUIStore()
 const { confirm } = useConfirm()
@@ -160,7 +169,12 @@ function formatDate(iso: string): string {
         class="tcp-cmt"
         :class="{ 'tcp-cmt--resolved': c.resolved }"
       >
-        <blockquote v-if="c.anchor.quote" class="tcp-quote">{{ c.anchor.quote }}</blockquote>
+        <SuggestionDiff
+          v-if="c.anchor.quote && c.anchor.replacement != null"
+          :quote="c.anchor.quote"
+          :replacement="c.anchor.replacement"
+        />
+        <blockquote v-else-if="c.anchor.quote" class="tcp-quote">{{ c.anchor.quote }}</blockquote>
         <div class="tcp-meta">
           <b>{{ c.author }}</b>
           <span>{{ formatDate(c.created_at) }}</span>
@@ -187,6 +201,13 @@ function formatDate(iso: string): string {
         <template v-else>
           <p class="tcp-body">{{ c.body }}</p>
           <div class="tcp-acts">
+            <button
+              v-if="c.acceptable && canAccept"
+              class="tcp-mini tcp-mini--primary"
+              @click="emit('accept', c)"
+            >
+              Accept
+            </button>
             <button v-if="c.editable" class="tcp-mini" @click="toggleResolved(c)">
               {{ c.resolved ? 'Reopen' : 'Resolve' }}
             </button>

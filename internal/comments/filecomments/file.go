@@ -141,6 +141,30 @@ func (s *Store) Update(_ context.Context, target comments.Target, id, body strin
 	return comments.ErrNotFound
 }
 
+// SetResolved flips the resolved flag only when it differs. The read-modify-
+// write runs under s.mu, which makes it atomic within this process; the file
+// backend is single-process, so that is the whole guarantee it needs.
+func (s *Store) SetResolved(_ context.Context, target comments.Target, id string, resolved bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	list, err := s.readThread(target.Key())
+	if err != nil {
+		return false, err
+	}
+	for i := range list {
+		if list[i].ID != id {
+			continue
+		}
+		if list[i].Resolved == resolved {
+			return false, nil
+		}
+		list[i].Resolved = resolved
+		return true, s.writeThread(target.Key(), list)
+	}
+	return false, comments.ErrNotFound
+}
+
 // Delete removes one comment, dropping the file once its last comment goes so
 // an emptied thread leaves no residue in the project tree.
 func (s *Store) Delete(_ context.Context, target comments.Target, id string) error {

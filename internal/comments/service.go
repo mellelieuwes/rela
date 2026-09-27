@@ -141,6 +141,13 @@ func (s *Service) Update(ctx context.Context, target Target, id, body string, re
 	return s.store.Update(ctx, target, id, body, resolved)
 }
 
+// SetResolved flips a comment's resolved flag only if it differs, reporting
+// whether this call changed it. See [Store.SetResolved]. Authorization is the
+// caller's job.
+func (s *Service) SetResolved(ctx context.Context, target Target, id string, resolved bool) (bool, error) {
+	return s.store.SetResolved(ctx, target, id, resolved)
+}
+
 // Delete removes one comment. Authorization is the caller's job.
 func (s *Service) Delete(ctx context.Context, target Target, id string) error {
 	return s.store.Delete(ctx, target, id)

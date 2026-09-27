@@ -266,3 +266,35 @@ describe('CommentsPanel is not a second source of truth', () => {
     expect(w.findAll('.comment')).toHaveLength(1)
   })
 })
+
+describe('CommentsPanel suggestions (TKT-S5C0K3)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    seedType()
+  })
+
+  const sugg = comment({
+    anchor: { kind: 'text', ref: '', quote: 'old words', replacement: 'new words' },
+    acceptable: true,
+  })
+
+  it('shows the diff and emits accept', async () => {
+    const w = mount(CommentsPanel, {
+      props: { entityType: ENTITY_TYPE, entityId: ENTITY_ID, comments: [sugg], canAccept: true },
+    })
+    await w.find('.panel-header').trigger('click')
+    expect(w.find('[data-testid="suggestion-diff"]').exists()).toBe(true)
+    const btn = w.findAll('button').find((b) => b.text() === 'Accept')
+    await btn!.trigger('click')
+    expect(w.emitted('accept')?.[0]).toEqual([sugg])
+  })
+
+  it('hides Accept without canAccept', async () => {
+    const w = mount(CommentsPanel, {
+      props: { entityType: ENTITY_TYPE, entityId: ENTITY_ID, comments: [sugg] },
+    })
+    await w.find('.panel-header').trigger('click')
+    expect(w.findAll('button').some((b) => b.text() === 'Accept')).toBe(false)
+  })
+})

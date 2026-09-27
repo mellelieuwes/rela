@@ -348,6 +348,10 @@ linters:
         path: internal/dataentry/(api_v1|sync|acl_write_test|handlers_attachment_write_test)\.go
         text: handleV1(CreateEntity|UpdateEntity|DeleteEntity|CreateRelation|UpdateRelation|DeleteRelation|CloneEntity|Action|ConflictResolve|PutAttachment|DeleteAttachment)|handleSyncDelete|handleSyncPut
       - linters:
+          - contextcheck
+        path: internal/dataentry/comments_handler\.go
+        text: commentAccept
+      - linters:
           - dupl
           - errcheck
           - funlen

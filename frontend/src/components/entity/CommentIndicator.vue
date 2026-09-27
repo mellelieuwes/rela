@@ -93,7 +93,10 @@ async function submit() {
   if (!text || submitting.value) return
   submitting.value = true
   try {
-    await addComment(props.entityType, props.entityId, { anchor: props.anchor, body: text })
+    await addComment(props.entityType, props.entityId, {
+      anchor: { kind: props.anchor.kind, ref: props.anchor.ref },
+      body: text,
+    })
     body.value = ''
     emit('changed')
   } catch (err) {

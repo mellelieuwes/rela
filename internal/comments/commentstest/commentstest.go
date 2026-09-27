@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Sourcehaven-BV/rela/internal/comments"
@@ -455,10 +456,76 @@ func RunOrderingTests(t *testing.T, f Factory) {
 	})
 }
 
+// runSetResolvedTests pins the conditional resolve flip an accepted
+// suggestion claims its comment with.
+func runSetResolvedTests(t *testing.T, f Factory) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("SetResolved flips only a differing flag", func(t *testing.T) {
+		s := f(t)
+		tgt := target("TKT-1")
+		require.NoError(t, s.Add(ctx, tgt, comment("c1", 0, "alice", "body")))
+
+		changed, err := s.SetResolved(ctx, tgt, "c1", true)
+		require.NoError(t, err)
+		require.True(t, changed)
+
+		// The second claim loses: this is what stops a suggestion being
+		// accepted twice.
+		changed, err = s.SetResolved(ctx, tgt, "c1", true)
+		require.NoError(t, err)
+		require.False(t, changed)
+
+		got, err := s.Get(ctx, tgt, "c1")
+		require.NoError(t, err)
+		require.True(t, got.Resolved)
+		require.Equal(t, "body", got.Body, "SetResolved must not touch the body")
+
+		changed, err = s.SetResolved(ctx, tgt, "c1", false)
+		require.NoError(t, err)
+		require.True(t, changed)
+	})
+
+	t.Run("SetResolved on an absent comment is ErrNotFound", func(t *testing.T) {
+		s := f(t)
+		_, err := s.SetResolved(ctx, target("TKT-1"), "nope", true)
+		require.ErrorIs(t, err, comments.ErrNotFound)
+	})
+
+	t.Run("SetResolved concurrently has exactly one winner", func(t *testing.T) {
+		s := f(t)
+		tgt := target("TKT-1")
+		require.NoError(t, s.Add(ctx, tgt, comment("c1", 0, "alice", "body")))
+
+		const racers = 8
+		var wg sync.WaitGroup
+		wins := make(chan bool, racers)
+		for range racers {
+			wg.Go(func() {
+				changed, err := s.SetResolved(ctx, tgt, "c1", true)
+				assert.NoError(t, err)
+				wins <- changed
+			})
+		}
+		wg.Wait()
+		close(wins)
+		n := 0
+		for w := range wins {
+			if w {
+				n++
+			}
+		}
+		require.Equal(t, 1, n)
+	})
+}
+
 // RunUpdateTests pins which fields an update may change.
 func RunUpdateTests(t *testing.T, f Factory) {
 	t.Helper()
 	ctx := context.Background()
+
+	runSetResolvedTests(t, f)
 
 	t.Run("updates body and resolved", func(t *testing.T) {
 		s := f(t)
@@ -490,6 +557,22 @@ func RunUpdateTests(t *testing.T, f Factory) {
 		require.Equal(t, orig.Author, got[0].Author)
 		require.True(t, orig.CreatedAt.Equal(got[0].CreatedAt))
 		require.Equal(t, orig.Anchor, got[0].Anchor)
+	})
+
+	t.Run("does not change a suggested replacement", func(t *testing.T) {
+		// A suggestion is reviewed as a diff; if an edit could swap it, what
+		// gets accepted would not be what was reviewed.
+		s := f(t)
+		tgt := target("TKT-1")
+		orig := comment("c1", 0, "alice", "before")
+		orig.Anchor = suggestionAnchor("proposed text")
+		require.NoError(t, s.Add(ctx, tgt, orig))
+
+		require.NoError(t, s.Update(ctx, tgt, "c1", "after", true))
+
+		got, err := s.Get(ctx, tgt, "c1")
+		require.NoError(t, err)
+		require.Equal(t, orig.Anchor, got.Anchor)
 	})
 
 	t.Run("missing comment reports ErrNotFound", func(t *testing.T) {
@@ -881,6 +964,46 @@ func RunRoundTripTests(t *testing.T, f Factory) {
 		require.Equal(t, want.Resolved, got[0].Resolved)
 	})
 
+	t.Run("suggested replacement round-trips", func(t *testing.T) {
+		// The empty string is the load-bearing case: it means "delete the
+		// quoted text", so a backend that folded it into "no suggestion"
+		// (omitempty on the dereferenced value) would silently turn a deletion
+		// into a plain comment.
+		for _, repl := range []string{"a better phrase\nwith a newline", ""} {
+			s := f(t)
+			tgt := target("TKT-1")
+			want := comment("c1", 0, "alice", "suggest")
+			want.Anchor = suggestionAnchor(repl)
+			require.NoError(t, s.Add(ctx, tgt, want))
+
+			got, err := s.Get(ctx, tgt, "c1")
+			require.NoError(t, err)
+			require.Equal(t, want.Anchor, got.Anchor)
+			require.NotNil(t, got.Anchor.Replacement, "replacement %q must not read back as absent", repl)
+		}
+	})
+
+	t.Run("returned anchor shares nothing with stored state", func(t *testing.T) {
+		// Anchor holds pointers. An in-memory backend handing out shallow
+		// copies would let a caller rewrite a stored suggestion in place.
+		s := f(t)
+		tgt := target("TKT-1")
+		c := comment("c1", 0, "alice", "suggest")
+		c.Anchor = suggestionAnchor("original")
+		require.NoError(t, s.Add(ctx, tgt, c))
+		*c.Anchor.Replacement = "mutated after add"
+
+		got, err := s.Get(ctx, tgt, "c1")
+		require.NoError(t, err)
+		*got.Anchor.Replacement = "mutated after get"
+		got.Anchor.Text.Quote = "mutated quote"
+
+		list, err := s.List(ctx, tgt)
+		require.NoError(t, err)
+		require.Equal(t, "original", *list[0].Anchor.Replacement)
+		require.Equal(t, "the quoted text", list[0].Anchor.Text.Quote)
+	})
+
 	t.Run("unicode body round-trips", func(t *testing.T) {
 		s := f(t)
 		tgt := target("TKT-1")
@@ -891,6 +1014,20 @@ func RunRoundTripTests(t *testing.T, f Factory) {
 		require.NoError(t, err)
 		require.Equal(t, body, got[0].Body)
 	})
+}
+
+// suggestionAnchor is a text anchor carrying a replacement.
+func suggestionAnchor(repl string) comments.Anchor {
+	return comments.Anchor{
+		Kind: comments.AnchorText,
+		Text: &comments.TextAnchor{
+			Quote:          "the quoted text",
+			Prefix:         "before ",
+			Suffix:         " after",
+			ParagraphIndex: 0,
+		},
+		Replacement: &repl,
+	}
 }
 
 func ids(list []comments.Comment) []string {

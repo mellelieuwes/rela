@@ -1,6 +1,8 @@
 package comments
 
 import (
+	"strings"
+
 	"github.com/vloothuis/textanchor"
 	"github.com/vloothuis/textanchor/quotefind"
 )
@@ -132,4 +134,65 @@ func NewTextAnchor(body string, start, end int) (*TextAnchor, error) {
 		HeadingContext:     a.HeadingContext,
 		ParagraphIndex:     a.ParagraphIndex,
 	}, nil
+}
+
+// ApplyReplacement returns body with the anchor's quoted range replaced by its
+// suggested replacement (TKT-S5C0K3).
+//
+// Returns [ErrNoSuggestion] when the anchor carries no replacement, and
+// [ErrSuggestionStale] unless BOTH hold:
+//
+//   - The located span is the quote, ignoring whitespace. The resolver can
+//     land on a fuzzy match; replacing one would overwrite text that differs
+//     from what the suggester quoted.
+//   - The location is certain: an exact-band confidence, or a quote that
+//     occurs exactly once. The band alone is too strict, because confidence
+//     also scores the surrounding context, so a unique quote whose
+//     neighboring sentence was edited drops into the uncertain band while
+//     its location is not in doubt.
+//
+// Offsets come from [ResolveText] and are sliced as-is: the span may be longer
+// than the quote where the resolver absorbed a reflowed line break.
+func ApplyReplacement(body string, a Anchor) (string, error) {
+	if a.Replacement == nil {
+		return "", ErrNoSuggestion
+	}
+	if a.Kind != AnchorText || a.Text == nil {
+		return "", ErrSuggestionStale
+	}
+	m := ResolveText(body, a.Text)
+	if m.Detached {
+		return "", ErrSuggestionStale
+	}
+	quote := collapseSpace(a.Text.Quote)
+	if collapseSpace(body[m.Start:m.End]) != quote {
+		return "", ErrSuggestionStale
+	}
+	if m.Confidence < ConfidenceExact && strings.Count(collapseSpace(body), quote) != 1 {
+		return "", ErrSuggestionStale
+	}
+	// Posting refused a quote across blocks, but the body may have changed
+	// since: a blank line added inside the quoted text collapses to the same
+	// words, and applying would silently merge the paragraphs back.
+	if crossesBlock(body[m.Start:m.End]) {
+		return "", ErrSuggestionStale
+	}
+	end := m.End
+	// Deleting a phrase between two spaces would leave both; keep one.
+	if *a.Replacement == "" && m.Start > 0 && end < len(body) && body[m.Start-1] == ' ' && body[end] == ' ' {
+		end++
+	}
+	return body[:m.Start] + *a.Replacement + body[end:], nil
+}
+
+// Acceptable reports whether [ApplyReplacement] would succeed on body.
+func Acceptable(body string, a Anchor) bool {
+	_, err := ApplyReplacement(body, a)
+	return err == nil
+}
+
+// collapseSpace trims s and folds every whitespace run to one space, the
+// comparison form under which a reflowed body still contains its quotes.
+func collapseSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

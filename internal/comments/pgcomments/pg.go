@@ -183,6 +183,28 @@ func (s *Store) Update(ctx context.Context, target comments.Target, id, body str
 	return nil
 }
 
+// SetResolved flips the resolved flag only when it differs. The condition sits
+// in the UPDATE's WHERE clause, so two processes racing on one row cannot both
+// see a change: the second finds the flag already set and affects nothing.
+func (s *Store) SetResolved(ctx context.Context, target comments.Target, id string, resolved bool) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE comments
+		SET resolved = $3, updated_at = $4
+		WHERE target_key = $1 AND id = $2 AND resolved <> $3`,
+		target.Key(), id, resolved, time.Now().UTC())
+	if err != nil {
+		return false, fmt.Errorf("pgcomments: set resolved %q on %q: %w", id, target.Key(), err)
+	}
+	if tag.RowsAffected() > 0 {
+		return true, nil
+	}
+	// No row changed: either it already held the value, or it is absent.
+	if _, err := s.Get(ctx, target, id); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // Delete removes one comment, reporting [comments.ErrNotFound] if absent.
 func (s *Store) Delete(ctx context.Context, target comments.Target, id string) error {
 	tag, err := s.db.Exec(ctx,

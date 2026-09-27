@@ -40,7 +40,9 @@ func (s *Store) List(_ context.Context, target comments.Target) ([]comments.Comm
 
 	stored := s.byward[target.Key()]
 	out := make([]comments.Comment, len(stored))
-	copy(out, stored)
+	for i, c := range stored {
+		out[i] = clone(c)
+	}
 	comments.SortComments(out)
 	return out, nil
 }
@@ -49,15 +51,14 @@ func (s *Store) List(_ context.Context, target comments.Target) ([]comments.Comm
 //
 // A scan, because this backend holds a thread as a slice and a map keyed by
 // comment ID would have to be maintained alongside it for no gain at the scale
-// this backend serves. [comments.Comment] is all value types, so the returned
-// copy shares nothing with stored state.
+// this backend serves. The result is a deep copy (see clone).
 func (s *Store) Get(_ context.Context, target comments.Target, id string) (comments.Comment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, c := range s.byward[target.Key()] {
 		if c.ID == id {
-			return c, nil
+			return clone(c), nil
 		}
 	}
 	return comments.Comment{}, comments.ErrNotFound
@@ -68,8 +69,25 @@ func (s *Store) Add(_ context.Context, target comments.Target, c comments.Commen
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.byward[target.Key()] = append(s.byward[target.Key()], c)
+	s.byward[target.Key()] = append(s.byward[target.Key()], clone(c))
 	return nil
+}
+
+// clone deep-copies the pointer fields of a comment's anchor.
+//
+// A struct copy is not enough: [comments.Anchor] holds pointers, so a shallow
+// copy would let a caller mutate stored state through the value it was handed,
+// which no persistent backend permits.
+func clone(c comments.Comment) comments.Comment {
+	if c.Anchor.Text != nil {
+		t := *c.Anchor.Text
+		c.Anchor.Text = &t
+	}
+	if c.Anchor.Replacement != nil {
+		r := *c.Anchor.Replacement
+		c.Anchor.Replacement = &r
+	}
+	return c
 }
 
 // Update replaces the mutable fields of one comment.
@@ -87,6 +105,25 @@ func (s *Store) Update(_ context.Context, target comments.Target, id, body strin
 		return nil
 	}
 	return comments.ErrNotFound
+}
+
+// SetResolved flips the resolved flag only when it differs.
+func (s *Store) SetResolved(_ context.Context, target comments.Target, id string, resolved bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stored := s.byward[target.Key()]
+	for i := range stored {
+		if stored[i].ID != id {
+			continue
+		}
+		if stored[i].Resolved == resolved {
+			return false, nil
+		}
+		stored[i].Resolved = resolved
+		return true, nil
+	}
+	return false, comments.ErrNotFound
 }
 
 // Delete removes one comment.

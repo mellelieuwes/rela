@@ -46,7 +46,7 @@ import CommentIndicator from '@/components/entity/CommentIndicator.vue'
 import TextSelectionComment from '@/components/entity/TextSelectionComment.vue'
 import TextCommentPopover from '@/components/entity/TextCommentPopover.vue'
 import BlockCommentOverlay from '@/components/entity/BlockCommentOverlay.vue'
-import { listComments, type Comment } from '@/api/comments'
+import { acceptComment, listComments, type Comment } from '@/api/comments'
 import { shouldFlipPopover } from '@/utils/popoverFlip'
 import { applyHighlights, type HighlightRange } from '@/utils/commentHighlight'
 import CommandModal from '@/components/entity/CommandModal.vue'
@@ -495,6 +495,48 @@ const contentAutoSave = useAutoSave({
   disableRelationsChannel: true,
 })
 
+// Accepting a suggestion (TKT-S5C0K3) writes the body on the server, so it must
+// not race a pending checkbox save: that PATCH would carry the pre-accept body
+// and undo the change, or fail its version check. Pending saves are flushed
+// first, and toggles are refused while the accept is in flight.
+const accepting = ref(false)
+const canAccept = computed(
+  () => canUpdate.value && !accepting.value && contentAutoSave.status.value !== 'saving'
+)
+
+async function acceptSuggestion(c: Comment) {
+  if (!canAccept.value) return
+  accepting.value = true
+  try {
+    // A save that timed out may still land on the server after the accept and
+    // overwrite it with the pre-accept body, so an unsettled flush aborts.
+    const flushed = await contentAutoSave.commitImmediately()
+    if (!flushed.settled || flushed.error) {
+      uiStore.error('Could not save pending changes; the suggestion was not applied')
+      return
+    }
+    const res = await acceptComment(props.entityType, commentEntityId.value, c.id)
+    const view = viewData.value
+    if (view?.entry) {
+      const nextSections = view.sections.map((s) =>
+        isEntryContentSection(s) ? { ...s, content: res.content } : s
+      )
+      viewData.value = { ...view, entry: { ...view.entry, content: res.content }, sections: nextSections }
+    }
+    if (res.warnings && res.warnings.length > 0) {
+      const codes = [...new Set(res.warnings.map((w) => w.code))].join(', ')
+      uiStore.warning(`Suggestion applied with ${res.warnings.length} warning(s): ${codes}`)
+    }
+    closeTextComment()
+    await loadView()
+  } catch (err) {
+    uiStore.error(`Failed to accept suggestion: ${getErrorMessage(err, 'unknown error')}`)
+    await loadComments()
+  } finally {
+    accepting.value = false
+  }
+}
+
 function contentClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null
 
@@ -598,6 +640,10 @@ function handleCheckboxToggle(index: number) {
   // `v-if` the way a button can, so the affordance gate lives at the handler.
   if (!canUpdate.value) {
     uiStore.warning('Update not permitted for this entity')
+    return
+  }
+  if (accepting.value) {
+    uiStore.warning('Applying a suggestion; try again in a moment')
     return
   }
   let newContent: string
@@ -2062,7 +2108,9 @@ function treeContainsEntity(nodes: ViewTreeNode[] | undefined, id: string): bool
               :entity-id="commentEntityId"
               :comments="openTextComments"
               :position="textCommentPos"
+              :can-accept="canAccept"
               @changed="loadComments"
+              @accept="acceptSuggestion"
               @close="closeTextComment"
             />
           </div>
@@ -2492,7 +2540,9 @@ function treeContainsEntity(nodes: ViewTreeNode[] | undefined, id: string): bool
           :entity-id="commentEntityId"
           :comments="comments"
           :section-ids="commentSectionIds"
+          :can-accept="canAccept"
           @changed="loadComments"
+          @accept="acceptSuggestion"
         />
       </div>
 

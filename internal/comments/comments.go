@@ -48,6 +48,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Sourcehaven-BV/rela/internal/entity"
@@ -85,6 +86,21 @@ var (
 	// pointing at a property that has since been removed is a soft condition
 	// per DEC-HWZHA and surfaces as a warning on read, never an error.
 	ErrInvalidAnchor = errors.New("comments: invalid anchor")
+
+	// ErrInvalidReplacement reports a suggested replacement that is too long,
+	// carries characters that could disguise it, sits on an anchor that cannot
+	// take one, or targets a quote that crosses a block boundary.
+	ErrInvalidReplacement = errors.New("comments: invalid replacement")
+
+	// ErrNoSuggestion reports an accept on a comment that carries no
+	// replacement. A state conflict rather than malformed input: the request
+	// is well-formed, the comment simply has nothing to apply.
+	ErrNoSuggestion = errors.New("comments: comment has no suggested replacement")
+
+	// ErrSuggestionStale reports that the quoted text can no longer be located
+	// with enough certainty to replace it. Accepting then would splice the
+	// replacement into text nobody suggested changing.
+	ErrSuggestionStale = errors.New("comments: the suggested text no longer matches the body")
 )
 
 // Limits on a single comment and on one target's thread. Both exist to bound
@@ -191,6 +207,17 @@ type Anchor struct {
 	// exactly as it did before this field existed — which is what lets stage 2
 	// ship without migrating a single stored comment.
 	Text *TextAnchor `json:"text,omitempty" yaml:"text,omitempty"`
+
+	// Replacement is a suggested substitute for the quoted text of an
+	// [AnchorText] anchor (TKT-S5C0K3), and nil for every other kind.
+	//
+	// A pointer because the empty string is a meaningful suggestion ("delete
+	// this text") and must stay distinct from "no suggestion". It lives on the
+	// anchor rather than the comment because, like the anchor, it is fixed at
+	// creation: [Store.Update] never touches it, so a suggestion cannot be
+	// swapped after someone has reviewed it. It is not on [TextAnchor], which
+	// mirrors the locator library and holds only what finds the text.
+	Replacement *string `json:"replacement,omitempty" yaml:"replacement,omitempty"`
 }
 
 // Validate reports whether the anchor is structurally usable.
@@ -224,7 +251,124 @@ func (a Anchor) Validate() error {
 	default:
 		return fmt.Errorf("%w: unknown kind %q", ErrInvalidAnchor, a.Kind)
 	}
+	if a.Replacement != nil {
+		return a.validateReplacement()
+	}
 	return nil
+}
+
+// validateReplacement applies the suggestion rules. Called only for an anchor
+// whose structural checks already passed.
+func (a Anchor) validateReplacement() error {
+	if a.Kind != AnchorText {
+		return fmt.Errorf("%w: only a text comment can suggest a replacement", ErrInvalidReplacement)
+	}
+	repl := *a.Replacement
+	if len(repl) > MaxBodyBytes {
+		return fmt.Errorf("%w: %d bytes exceeds the %d-byte limit", ErrInvalidReplacement, len(repl), MaxBodyBytes)
+	}
+	if !utf8.ValidString(repl) {
+		return fmt.Errorf("%w: not valid UTF-8", ErrInvalidReplacement)
+	}
+	for _, r := range repl {
+		if r == '\n' || r == '\t' {
+			continue
+		}
+		// Control characters are refused for the reason ValidateBody gives.
+		// The invisible ones are refused because a reviewer approves what the
+		// diff SHOWS: a bidi override or zero-width character makes the text
+		// that lands in the body differ from the text that was approved.
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || isInvisibleFormat(r) {
+			return fmt.Errorf("%w: U+%04X is not allowed", ErrInvalidReplacement, r)
+		}
+	}
+	if !Replaceable(a.Text) {
+		return fmt.Errorf("%w: the selection spans more than one paragraph or list item", ErrInvalidReplacement)
+	}
+	return nil
+}
+
+// isInvisibleFormat reports characters that render as nothing or reorder the
+// text around them, so a diff showing them would not show what gets written.
+//
+// The whole format category (Cf) rather than a hand list: it covers zero-width
+// characters, every bidi control, the soft hyphen and the tag block, which can
+// spell hidden ASCII. Variation selectors, the Hangul fillers and the Unicode
+// line/paragraph separators are outside Cf and render blank, so they are added.
+func isInvisibleFormat(r rune) bool {
+	switch {
+	case unicode.In(r, unicode.Cf, unicode.Variation_Selector):
+		return true
+	case r == '\u115F', r == '\u1160', r == '\u3164', r == '\uFFA0', // Hangul fillers
+		r == '\u2028', r == '\u2029', // line and paragraph separators
+		r == '\u034F', r == '\u180E': // combining grapheme joiner, Mongolian vowel separator
+		return true
+	}
+	return false
+}
+
+// Replaceable reports whether a suggested replacement may target t: it must
+// lie within one markdown block. The same rule [Anchor.Validate] applies to a
+// posted suggestion.
+func Replaceable(t *TextAnchor) bool {
+	return t != nil && !crossesBlock(t.Quote)
+}
+
+// crossesBlock reports whether a SOURCE quote spans a markdown block boundary.
+//
+// Replacing such a quote would replace the markup between the blocks too (a
+// blank line, a list marker, a heading hash), so one plain-text replacement
+// would merge or unformat blocks the suggester never saw as markup. A single
+// newline inside a paragraph is fine: fsstore reflows every body at 80
+// columns, so most multi-line quotes are one paragraph.
+func crossesBlock(quote string) bool {
+	lines := strings.Split(quote, "\n")
+	for _, line := range lines[1:] {
+		t := strings.TrimLeft(line, " \t")
+		if t == "" || startsBlock(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// startsBlock reports whether a line opens a new markdown block, or ends one
+// (a setext heading underline or a thematic break).
+//
+// It errs toward refusing: a false positive only stops a suggestion from being
+// posted, while a miss lets one replacement strip block markup.
+func startsBlock(line string) bool {
+	for _, p := range []string{"- ", "* ", "+ ", "#", ">", "|", "```", "~~~"} {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	if isRuleLine(line) {
+		return true
+	}
+	// An HTML block: a tag, closing tag, comment or declaration.
+	if len(line) > 1 && line[0] == '<' {
+		c := line[1]
+		if c == '/' || c == '!' || c == '?' || (c|0x20 >= 'a' && c|0x20 <= 'z') {
+			return true
+		}
+	}
+	// Ordered list item: digits then ". " or ") ".
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	return i > 0 && i+1 < len(line) && (line[i] == '.' || line[i] == ')') && line[i+1] == ' '
+}
+
+// isRuleLine reports a line made only of one of `=`, `-`, `*` or `_` (spaces
+// allowed): a setext heading underline or a thematic break.
+func isRuleLine(line string) bool {
+	t := strings.TrimRight(line, " \t")
+	if t == "" || !strings.ContainsRune("=-*_", rune(t[0])) {
+		return false
+	}
+	return strings.Trim(t, string(t[0])+" \t") == ""
 }
 
 // Comment is one remark attached to one entity.
@@ -312,6 +456,17 @@ type Store interface {
 	// CreatedAt and Anchor are immutable — editing a comment must not let it
 	// change who said it or what it was about.
 	Update(ctx context.Context, target Target, id string, body string, resolved bool) error
+
+	// SetResolved sets only the resolved flag, and only when it differs from
+	// the stored value, as one atomic step. changed reports whether this call
+	// flipped it; false means it already held that value. Returns
+	// [ErrNotFound] if the comment does not exist.
+	//
+	// Conditional because accepting a suggestion claims the comment by
+	// resolving it: two requests, possibly on two server processes sharing one
+	// database, must not both believe they won. It leaves the body alone so a
+	// concurrent edit to it is not overwritten.
+	SetResolved(ctx context.Context, target Target, id string, resolved bool) (changed bool, err error)
 
 	// Delete removes one comment. Returns [ErrNotFound] if absent.
 	Delete(ctx context.Context, target Target, id string) error

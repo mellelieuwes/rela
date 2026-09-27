@@ -10,6 +10,7 @@ import {
 } from '@/api/comments'
 import { getErrorMessage } from '@/api/errors'
 import { useConfirm } from '@/composables/useConfirm'
+import SuggestionDiff from './SuggestionDiff.vue'
 
 /**
  * The entity's comment thread (TKT-FIO205, stage 1).
@@ -37,11 +38,14 @@ const props = defineProps<{
    * alongside the type's properties.
    */
   sectionIds?: string[]
+  /** See TextCommentPopover's prop of the same name. */
+  canAccept?: boolean
 }>()
 
 // Every mutation reports up rather than editing a local copy — one source of
 // truth is what keeps this panel and the field indicators in agreement.
-const emit = defineEmits<{ changed: [] }>()
+// `accept` included: the parent settles pending body writes first.
+const emit = defineEmits<{ changed: []; accept: [comment: Comment] }>()
 
 const schemaStore = useSchemaStore()
 const uiStore = useUIStore()
@@ -123,7 +127,7 @@ async function submit() {
   submitting.value = true
   try {
     await addComment(props.entityType, props.entityId, {
-      anchor: option.anchor,
+      anchor: { kind: option.anchor.kind, ref: option.anchor.ref },
       body: newBody.value.trim(),
     })
     newBody.value = ''
@@ -268,8 +272,20 @@ watch(
           </div>
 
           <template v-else>
+            <SuggestionDiff
+              v-if="comment.anchor.quote && comment.anchor.replacement != null"
+              :quote="comment.anchor.quote"
+              :replacement="comment.anchor.replacement"
+            />
             <p class="comment-body">{{ comment.body }}</p>
             <div class="comment-actions">
+              <button
+                v-if="comment.acceptable && canAccept"
+                class="btn btn-sm btn-primary"
+                @click="emit('accept', comment)"
+              >
+                Accept
+              </button>
               <button
                 v-if="comment.editable"
                 class="btn btn-sm btn-secondary"

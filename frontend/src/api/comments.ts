@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { Warning } from '@/types/entity'
 
 /**
  * How a comment is pinned to part of an entity.
@@ -33,6 +34,12 @@ export interface CommentAnchor {
   /** Located, but far enough from an exact match that the UI should say the
    *  text may have moved. */
   uncertain?: boolean
+  /**
+   * Suggested substitute for `quote` (text anchors only). `""` suggests
+   * deleting the text; absent or null means the comment suggests nothing.
+   * `quote` is the markdown SOURCE the replacement will overwrite.
+   */
+  replacement?: string | null
 }
 
 /** One comment as served by `/api/v1/_comments/...`. */
@@ -57,6 +64,12 @@ export interface Comment {
    */
   editable: boolean
   deletable: boolean
+  /**
+   * The suggestion could be applied to the current body: it has one, the
+   * comment is open, and the quote still locates unambiguously. Combine it
+   * with the entity's `_actions.update`; the server re-checks both on accept.
+   */
+  acceptable?: boolean
 }
 
 interface CommentListResponse {
@@ -80,6 +93,8 @@ export interface AddCommentRequest {
      */
     quote_prefix?: string
     quote_suffix?: string
+    /** Suggested replacement for the quote's SOURCE text; `""` deletes it. */
+    replacement?: string
   }
   body: string
 }
@@ -137,6 +152,14 @@ export async function deleteComment(
 export interface ResolveCheck {
   anchorable: boolean
   reason?: string
+  /**
+   * The markdown source the selection maps to. A suggestion must start from
+   * this rather than the rendered selection, or accepting it would drop any
+   * markup inside the range.
+   */
+  source_quote?: string
+  /** Whether a suggested replacement for this selection would be accepted. */
+  suggestable?: boolean
 }
 
 /**
@@ -161,4 +184,25 @@ export async function checkAnchorable(
     quote_prefix: prefix,
     quote_suffix: suffix,
   })
+}
+
+export interface AcceptResult {
+  /** The entity body as written, to replace any local copy. */
+  content: string
+  warnings?: Warning[]
+}
+
+/**
+ * acceptComment applies a comment's suggested replacement to the entity body
+ * and resolves the comment. Requires the right to edit the entity.
+ */
+export async function acceptComment(
+  entityType: string,
+  entityId: string,
+  commentId: string
+): Promise<AcceptResult> {
+  return api.post<AcceptResult>(
+    `${targetPath(entityType, entityId)}/${encodeURIComponent(commentId)}/accept`,
+    {}
+  )
 }

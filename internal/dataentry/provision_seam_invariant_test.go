@@ -35,6 +35,8 @@ func TestProvisionSeam_EveryWriteHandlerUsesEnterWrite(t *testing.T) {
 		"actions.go",
 		"attachment_handler.go",
 		"handlers_attachment.go",
+		"comments_wiring.go",
+		"comments_handler.go",
 	}
 	lockRe := regexp.MustCompile(`\bwriteMu\.Lock\(\)`)
 

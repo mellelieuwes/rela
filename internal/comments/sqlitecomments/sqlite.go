@@ -176,6 +176,31 @@ func (s *Store) Update(ctx context.Context, target comments.Target, id, body str
 	return requireAffected(res, comments.ErrNotFound)
 }
 
+// SetResolved flips the resolved flag only when it differs, with the condition
+// in the UPDATE's WHERE clause so the check and the write are one statement.
+func (s *Store) SetResolved(ctx context.Context, target comments.Target, id string, resolved bool) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE comments
+		SET resolved = ?, updated_at = ?
+		WHERE target_key = ? AND id = ? AND resolved <> ?`,
+		resolved, time.Now().UTC().Format(timeFmt), target.Key(), id, resolved)
+	if err != nil {
+		return false, fmt.Errorf("sqlitecomments: set resolved %q on %q: %w", id, target.Key(), err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("sqlitecomments: rows affected: %w", err)
+	}
+	if n > 0 {
+		return true, nil
+	}
+	// No row changed: either it already held the value, or it is absent.
+	if _, err := s.Get(ctx, target, id); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // Delete removes one comment, reporting [comments.ErrNotFound] if absent.
 func (s *Store) Delete(ctx context.Context, target comments.Target, id string) error {
 	res, err := s.db.ExecContext(ctx,

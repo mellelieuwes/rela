@@ -81,6 +81,7 @@ func TestRouterWalk_AllAPIRoutesReachHandlers(t *testing.T) {
 		// a regression that drops the registration shows up as a reachability
 		// failure rather than a silently-identical status.
 		{http.MethodGet, "/api/v1/_comments/ticket/TKT-001", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/_comments/ticket/TKT-001/c1/accept", http.StatusNotFound},
 		{http.MethodGet, "/api/v1/_conflicts", 0},
 		{http.MethodGet, "/api/v1/_conflicts/some-id", 0},
 		{http.MethodGet, "/api/v1/_documents/readme", 0},

@@ -192,6 +192,41 @@ own affordance: hover it and a comment button appears. Behind the scenes these
 anchor to the block's markdown source, so they behave exactly like a text
 anchor.
 
+## Suggested changes
+
+A text comment can carry a **suggested replacement**. Select text, click
+**Comment**, then **Suggest a change**. The replacement box starts with the
+markdown source of the selection, so formatting such as `**bold**` inside the
+range is visible and kept unless you change it. An empty replacement suggests
+deleting the text.
+
+The thread shows the suggestion as removed and added text. Anyone who may edit
+the entity sees an **Accept** button while the quoted text is still in the body.
+Accepting does two things on the server:
+
+1. It replaces the quoted text in the body. This is an ordinary entity write,
+   so it is authorized, validated and audited like any other edit, under the
+   name of the person who accepted.
+2. It resolves the suggestion.
+
+rela only applies a suggestion when it can locate the quoted text with
+certainty. If the quoted text was edited, or rela cannot tell which of several
+occurrences was meant, **Accept** is not offered and the server refuses with
+409. The suggestion stays open, and you can apply the change by hand.
+
+Some limits apply:
+
+- A suggestion can only replace text within one block. A selection that spans
+  paragraphs, list items or headings can be commented on, but not replaced.
+- The replacement cannot contain control characters (other than tab and
+  newline), zero-width characters or text-direction overrides. These can hide
+  what a change really does.
+- The replacement cannot be edited after posting. To change it, delete the
+  suggestion and post a new one.
+- Accepting takes `comment:read` plus permission to update the entity.
+  `comment:update-any` is not needed, even though accepting resolves someone
+  else's comment.
+
 ## Comments are per content state
 
 If your project uses [content states](content-states.md), comments belong to
@@ -211,7 +246,16 @@ POST   /api/v1/_comments/{type}/{id}              add one
 PATCH  /api/v1/_comments/{type}/{id}/{commentID}  edit the body / resolve
 DELETE /api/v1/_comments/{type}/{id}/{commentID}  remove one
 POST   /api/v1/_comments/{type}/{id}/resolve      check whether a selection can be anchored
+POST   /api/v1/_comments/{type}/{id}/{commentID}/accept  apply a suggestion and resolve it
 ```
+
+A create body adds a suggestion with `anchor.replacement`. `resolve` returns
+the selection's markdown source as `source_quote`. Each listed comment carries
+`acceptable: true` when its suggestion can be applied to the current body.
+
+`accept` returns the new body and any write warnings. It answers 409 when the
+comment has no suggestion, is already resolved, or no longer matches the body
+exactly. A refused or failed entity write reopens the comment.
 
 Add a `@face` suffix to the id to address one content state:
 `/api/v1/_comments/ticket/TKT-001@draft`.
@@ -224,7 +268,8 @@ comment by reusing it.
 ## What comments deliberately do not do
 
 - **No entity type.** Comments never enter `store.Store`, `entitymanager`, the
-  audit log or `/_schema`.
+  audit log or `/_schema`. Accepting a suggestion writes the ENTITY, and that
+  write is audited; the comment itself is not.
 - **No versioning.** A comment's edit history is not kept.
 - **No search indexing.** Comments are not returned by `/_search`.
 - **No threading.** A reply is a separate comment sharing an anchor; they render
@@ -237,6 +282,7 @@ comment by reusing it.
 | Comment body | 16 KB, no control characters except tab and newline |
 | Comments per target | 500 |
 | Anchored quote | 5 characters minimum, 2 KB maximum |
+| Suggested replacement | 16 KB, one block of the quoted text |
 
 The quote minimum exists because a shorter selection cannot be re-located
 reliably — accepting one would mint a comment that detaches on the next edit.

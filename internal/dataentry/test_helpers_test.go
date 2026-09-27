@@ -262,7 +262,7 @@ func rebindApp(app *App, fs storage.FS, paths *project.Context, svc *appbuild.Se
 	// Comments handler over the app's current services (mirrors NewApp). The
 	// SERVICE inside stays nil until a test calls SetComments, which is the
 	// "commenting disabled" state the 404 routes depend on.
-	app.comments = newCommentsHandler(app)
+	app.comments = newCommentsHandler(app, svc.EntityManager())
 
 	// writeHandler mirrors production wiring (see NewApp): closures for the
 	// swappable acl/audit collaborators, values for the fixed service handles,

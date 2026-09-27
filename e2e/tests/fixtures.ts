@@ -205,7 +205,7 @@ export interface ApiHelpers {
   setEntityContent(plural: string, id: string, content: string): Promise<EntityResponse>;
   /** A target's comment thread (TKT-FIO205). Comments live outside the entity
    *  store, so seeding and cleanup do not ride entity CRUD. */
-  listComments(type: string, id: string): Promise<{ comments: { id: string }[] }>;
+  listComments(type: string, id: string): Promise<{ comments: { id: string; resolved: boolean }[] }>;
   deleteComment(type: string, id: string, commentId: string): Promise<void>;
   createRelation(
     fromPlural: string,

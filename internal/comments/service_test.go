@@ -235,6 +235,12 @@ func (s *countingStore) Update(
 	return s.inner.Update(ctx, target, id, body, resolved)
 }
 
+func (s *countingStore) SetResolved(
+	ctx context.Context, target comments.Target, id string, resolved bool,
+) (bool, error) {
+	return s.inner.SetResolved(ctx, target, id, resolved)
+}
+
 func (s *countingStore) Delete(ctx context.Context, target comments.Target, id string) error {
 	return s.inner.Delete(ctx, target, id)
 }
