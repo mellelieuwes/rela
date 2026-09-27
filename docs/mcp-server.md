@@ -310,14 +310,11 @@ gets through the web UI:
   "not found" error as an id that does not exist.
 - `search_entities` returns only entities you may read, and drops a hit that
   matched only on a property hidden from you.
-- `lua_eval` and `lua_run` read through the same gate. `rela.bypass_acl` is
-  not available, and a write returns the entity as you are allowed to see it.
 
-Note the current scope: **every tool is exposed remotely**, including
-`lua_eval` and `lua_run`. Those run in a sandboxed interpreter with no OS
-libraries and are ACL-gated like everything else, so they are not an escape
-hatch — but if you would rather a new tool were opt-in per transport, that
-allowlist is not built yet.
+**The Lua tools are not available remotely.** `lua_eval`, `lua_run` and
+`lua_list` exist only over stdio. A script is caller-supplied code that runs in
+the server process, so offering it over HTTP would let any remote caller use
+server CPU and memory at will. Every other tool is exposed remotely.
 
 ### Differences from stdio
 
@@ -342,7 +339,7 @@ allowlist is not built yet.
 ## Audit log
 
 Every entity / relation write performed through MCP tools (including
-`lua_eval` and `lua_run`) is recorded in `.rela/audit/YYYY-MM-DD.jsonl`
+`lua_eval` and `lua_run` over stdio) is recorded in `.rela/audit/YYYY-MM-DD.jsonl`
 with `principal.tool: "mcp"`.
 
 **Over stdio**, `principal.user` is the OS user that launched `rela mcp` —

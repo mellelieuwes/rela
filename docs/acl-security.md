@@ -1234,9 +1234,9 @@ other surfaces and how each counts hidden entities.
   authentication, so there is no principal to gate for; it runs with the
   operator's own file access, like the CLI. The **remote** MCP endpoint
   (`rela-server -mcp`) is JWT-authenticated and gated (TKT-4QSZ8Y): entity
-  and relation reads, `search_entities`, trace, resources and the Lua tools
-  all read through `GatedReads`. Search drops hits that matched only hidden
-  properties, and the Lua tools get no `rela.bypass_acl`. These residuals
+  and relation reads, `search_entities`, trace and resources all read
+  through `GatedReads`. Search drops hits that matched only hidden
+  properties. The Lua tools are not offered there at all. These residuals
   remain on the remote endpoint:
   - relation meta values are not field-redacted (TKT-0RBFN0), the same as
     on every other read path;

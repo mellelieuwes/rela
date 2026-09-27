@@ -189,3 +189,40 @@ axios.defaults.adapter = async (config) => ({
   headers: {},
   config,
 })
+
+// Cancel every timer a test file leaves pending once the file finishes.
+// Milkdown's ctx Timer arms a 3s timeout per readiness signal and never clears
+// it; when it fires it calls the global removeEventListener. On a slow runner
+// that happens after vitest's happy-dom teardown has deleted that global, and
+// the resulting ReferenceError is an unhandled error that fails the run even
+// though every test passed.
+const realSetTimeout = globalThis.setTimeout
+const realClearTimeout = globalThis.clearTimeout
+const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
+
+const trackedSetTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+  const id = realSetTimeout(
+    (...cbArgs: unknown[]) => {
+      pendingTimers.delete(id)
+      if (typeof handler === 'function') handler(...cbArgs)
+    },
+    timeout,
+    ...args
+  )
+  pendingTimers.add(id)
+  return id
+}) as unknown as typeof setTimeout
+Object.defineProperties(trackedSetTimeout, Object.getOwnPropertyDescriptors(realSetTimeout))
+
+const trackedClearTimeout = ((id?: Parameters<typeof clearTimeout>[0]) => {
+  if (id !== undefined) pendingTimers.delete(id as ReturnType<typeof setTimeout>)
+  realClearTimeout(id)
+}) as typeof clearTimeout
+
+globalThis.setTimeout = trackedSetTimeout
+globalThis.clearTimeout = trackedClearTimeout
+
+afterAll(() => {
+  for (const id of pendingTimers) realClearTimeout(id)
+  pendingTimers.clear()
+})

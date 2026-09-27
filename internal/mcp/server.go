@@ -73,11 +73,14 @@ type Deps struct {
 	Validator     validator.Validator
 	EntityManager EntityWriter
 	Config        config.Loader
-	LuaWriteDeps  lua.WriteDeps
-	LuaCache      *lua.Cache
-	Watcher       Watcher
-	ProjectRoot   string
-	Attachments   AttachmentDeps
+	// LuaWriteDeps and LuaCache back the lua_* tools, which exist only
+	// when the server is built [WithLuaTools]. A wiring that does not pass
+	// that option leaves both zero.
+	LuaWriteDeps lua.WriteDeps
+	LuaCache     *lua.Cache
+	Watcher      Watcher
+	ProjectRoot  string
+	Attachments  AttachmentDeps
 }
 
 // GraphReader is the read capability MCP requires of its store — the exact
@@ -173,6 +176,19 @@ func (d Deps) validate() error {
 	return d.Attachments.validate()
 }
 
+// validateFor is Deps.validate plus the checks that depend on how s was
+// built: a server [WithLuaTools] needs the Lua write deps. A free function to
+// keep Server under its plimsoll load line.
+func validateFor(s *Server, d Deps) error {
+	if err := d.validate(); err != nil {
+		return err
+	}
+	if s.luaTools && d.LuaWriteDeps.EntityManager == nil {
+		return errors.New("mcp: WithLuaTools requires Deps.LuaWriteDeps")
+	}
+	return nil
+}
+
 // Watcher is the narrow file-watching capability MCP requires from
 // its wiring site. Start arms the watcher with an opaque "something
 // changed" callback; Pause / Resume temporarily suppress callbacks
@@ -226,6 +242,10 @@ type Server struct {
 	logger    *slog.Logger
 	principal principal.Principal
 
+	// luaTools registers lua_eval / lua_run / lua_list. Off unless the wiring
+	// asks for it with [WithLuaTools]; see that option for why.
+	luaTools bool
+
 	// state publishes the reloadable (Deps, handlerSet) pair. Read it per
 	// request via [Server.deps] / the s.<group>() accessors, never by
 	// caching the result across a call — a schema hot-reload (TKT-NU247U)
@@ -269,7 +289,7 @@ func (s *Server) deps() Deps { return s.state.current().deps }
 // resolved the snapshot completes against it; the next one sees the new
 // bundle.
 func (s *Server) ReloadDeps(d Deps) error {
-	if err := d.validate(); err != nil {
+	if err := validateFor(s, d); err != nil {
 		return err
 	}
 	setDeps(s, d)
@@ -343,6 +363,19 @@ func WithPrincipal(p principal.Principal) Option {
 	return func(s *Server) { s.principal = p }
 }
 
+// WithLuaTools registers the Lua scripting tools (lua_eval, lua_run,
+// lua_list). Only the stdio wiring passes it.
+//
+// Opt-in because a script is caller-supplied code that runs in the server
+// process. Over stdio the caller already controls the machine. Over HTTP it
+// would let any remote caller run arbitrary scripts, which is a
+// denial-of-service surface the remote API does not need. Making the default
+// "absent" means a new networked wiring cannot expose them by forgetting to
+// opt out.
+func WithLuaTools() Option {
+	return func(s *Server) { s.luaTools = true }
+}
+
 // principalMiddleware stamps the server's Principal on every inbound
 // request ctx. Registered once in NewServer via AddReceivingMiddleware
 // so no per-handler opt-in is required (CLAUDE.md: "make the wrong thing
@@ -392,7 +425,7 @@ func NewServer(deps Deps, version string, opts ...Option) (*Server, error) {
 	if s.principal.IsZero() {
 		return nil, errors.New("mcp.NewServer: Principal is required (use WithPrincipal)")
 	}
-	if err := deps.validate(); err != nil {
+	if err := validateFor(s, deps); err != nil {
 		return nil, err
 	}
 	setDeps(s, deps)

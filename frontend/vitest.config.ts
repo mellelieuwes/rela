@@ -24,6 +24,17 @@ export default defineConfig({
     globals: true,
     environment: 'happy-dom',
     setupFiles: ['./src/test/setup.ts'],
+    // Tests have no server to fetch stylesheets from. relaEditor links
+    // `_rela-editor.css`, and the failed fetch surfaces as an unhandled
+    // NetworkError that fails the run. Report such links as loaded instead.
+    environmentOptions: {
+      happyDOM: {
+        settings: {
+          disableCSSFileLoading: true,
+          handleDisabledFileLoadingAsSuccess: true,
+        },
+      },
+    },
     include: ['src/**/*.{test,spec}.{js,ts,vue}', '*.{test,spec}.ts'],
     // Milkdown's Timer.start() schedules a 3s setTimeout that is never
     // cleared, even after the timer resolves. When a file finishes sooner,

@@ -591,20 +591,20 @@ with an `acl.yaml` never need this flag.
 > pass `--allow-unauthenticated-commands`. This is deliberate — the old
 > default exposed unauthenticated shell execution to the network.
 
-### Remote MCP exposes every tool, with no per-transport allowlist
+### Remote MCP exposes every tool except Lua
 
 `-mcp` (see [mcp-server.md](mcp-server.md#remote-mcp-over-http)) serves the
-full MCP tool set over HTTP, including `lua_eval` and `lua_run`. Every call is
+MCP tool set over HTTP, except the Lua tools (`lua_eval`, `lua_run`,
+`lua_list`). A script is caller-supplied code that runs in the server process,
+so a remote caller could use it to exhaust server resources. Lua tools are
+opt-in per server (`WithLuaTools`), and only local stdio opts in. Every call is
 authenticated (the flag refuses to start without verified JWT identity),
 authorized by the same ACL as the web API, and audited as the requesting
 principal — so a remote caller can do exactly what that person could do
 through the UI, no more.
 
-What is *not* built is a per-transport allowlist: a tool added for local stdio
-use becomes remotely reachable the moment `-mcp` is on. The Lua tools run
-sandboxed (no OS libraries) and gated, so this is a defense-in-depth gap
-rather than an escape hatch, but operators enabling `-mcp` should know the
-surface is "all tools", not a curated subset.
+Apart from Lua there is no per-transport allowlist: a new tool added for local
+stdio use becomes remotely reachable the moment `-mcp` is on.
 
 Two related gaps, both deliberate and tracked:
 

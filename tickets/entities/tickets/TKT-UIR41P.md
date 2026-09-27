@@ -161,6 +161,9 @@ committed **before** the migration starts.
 7. `lua_eval` / `lua_run` / `lua_list` are **absent from the remote tool list**,
 pinned by a test; stdio still exposes them.
 
+   _Status:_ not built when TKT-BDG8U9 shipped the HTTP endpoint. Implemented
+   by BUG-RIJR6R (`mcp.WithLuaTools`, `TestRemoteMCPDeps_UsesGatedHandles`).
+
    Deliberately NOT extended to "no Lua executes remotely": `analyze_validations`
    runs operator-authored `lua_file:` validation rules, and that is fine. The
    CLAUDE.md "don't run user-supplied Lua on the read path" rule targets

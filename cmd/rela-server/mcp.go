@@ -8,7 +8,6 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/appbuild"
 	"github.com/Sourcehaven-BV/rela/internal/dataentry"
-	"github.com/Sourcehaven-BV/rela/internal/lua"
 	relamcp "github.com/Sourcehaven-BV/rela/internal/mcp"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 )
@@ -76,17 +75,17 @@ func wireIdentityAndMCP(app *dataentry.App, svc *appbuild.Services, f *serverFla
 // filesystem is the trust boundary (anyone who can run `rela mcp` can edit
 // the files directly), so a gate would defend nothing. A remote caller has no
 // filesystem access, so the ACL is the ONLY boundary.
+//
+// **No Lua tools.** The server is built without [relamcp.WithLuaTools], so
+// lua_eval, lua_run and lua_list do not exist here. A remote caller may not
+// run scripts in the server process.
 func wireRemoteMCP(app *dataentry.App, svc *appbuild.Services, f *serverFlags) error {
 	if !f.remoteMCP {
 		return nil
 	}
 
 	factory := func(host dataentry.MCPHost) (http.Handler, error) {
-		srv, err := relamcp.NewServer(remoteMCPDeps(svc, host), mcpServerVersion,
-			relamcp.WithPrincipal(principal.Principal{
-				User: principal.SystemUser(),
-				Tool: principal.ToolMCP,
-			}))
+		srv, err := newRemoteMCPServer(svc, host)
 		if err != nil {
 			return nil, err
 		}
@@ -115,14 +114,20 @@ func remoteAttachmentDeps(svc *appbuild.Services, host dataentry.MCPHost) relamc
 	}
 }
 
+// newRemoteMCPServer builds the remote MCP server. It does not pass
+// [relamcp.WithLuaTools]; see [wireRemoteMCP].
+func newRemoteMCPServer(svc *appbuild.Services, host dataentry.MCPHost) (*relamcp.Server, error) {
+	return relamcp.NewServer(remoteMCPDeps(svc, host), mcpServerVersion,
+		relamcp.WithPrincipal(principal.Principal{
+			User: principal.SystemUser(),
+			Tool: principal.ToolMCP,
+		}))
+}
+
 // remoteMCPDeps builds the MCP dependencies for the remote endpoint. Every
-// read handle, including search and the Lua tools' reads, comes from
-// [appbuild.Services.GatedReads]. The Lua tools get no elevated handle, so a
-// remote caller cannot use rela.bypass_acl.
-//
-// LuaCache is nil on purpose. The script engine's cache is shared with
-// data-entry and keyed by script path, not by principal, so a memoized gated
-// read by one caller would be served to the next.
+// read handle, including search, comes from [appbuild.Services.GatedReads].
+// LuaWriteDeps and LuaCache stay zero because the remote server has no Lua
+// tools.
 func remoteMCPDeps(svc *appbuild.Services, host dataentry.MCPHost) relamcp.Deps {
 	reads := svc.GatedReads()
 	return relamcp.Deps{
@@ -133,13 +138,9 @@ func remoteMCPDeps(svc *appbuild.Services, host dataentry.MCPHost) relamcp.Deps 
 		Validator:     reads.Validator,
 		EntityManager: svc.EntityManager(),
 		Config:        svc.Config(),
-		LuaWriteDeps: lua.WriteDeps{
-			ReadDeps:      reads.LuaReads,
-			EntityManager: svc.EntityManager(),
-		},
-		Watcher:     noopWatcher{},
-		ProjectRoot: svc.Paths().Root,
-		Attachments: remoteAttachmentDeps(svc, host),
+		Watcher:       noopWatcher{},
+		ProjectRoot:   svc.Paths().Root,
+		Attachments:   remoteAttachmentDeps(svc, host),
 	}
 }
 

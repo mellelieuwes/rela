@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/Sourcehaven-BV/rela/internal/lua"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 )
 
@@ -35,7 +37,7 @@ func newDispatchServer(t *testing.T) *Server {
 
 	meta, st := makeTestFixture(t)
 	srv, err := NewServer(newTestDeps(t, meta, st), "test",
-		WithPrincipal(principal.Principal{User: "tester", Tool: principal.ToolMCP}))
+		WithPrincipal(principal.Principal{User: "tester", Tool: principal.ToolMCP}), WithLuaTools())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -237,6 +239,53 @@ func TestDispatch_ToolInventoryMatches(t *testing.T) {
 	sort.Strings(missing)
 	for _, name := range missing {
 		t.Errorf("tool %q is registered but has no dispatch test case — add it to toolCalls", name)
+	}
+}
+
+// TestNewServer_LuaToolsAreOptIn pins that a server built without
+// WithLuaTools registers no lua_* tool, and that a call fails. That is the
+// remote (HTTP) wiring, which must not let callers run scripts (BUG-RIJR6R).
+func TestNewServer_LuaToolsAreOptIn(t *testing.T) {
+	t.Parallel()
+
+	meta, st := makeTestFixture(t)
+	srv, err := NewServer(newTestDeps(t, meta, st), "test",
+		WithPrincipal(principal.Principal{User: "tester", Tool: principal.ToolMCP}))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	result, rpcErr := dispatch(t, srv, "tools/list", `{}`)
+	if rpcErr != nil {
+		t.Fatalf("tools/list: JSON-RPC error %d: %s", rpcErr.Code, rpcErr.Message)
+	}
+	var decoded struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatalf("decode tools/list result: %v", err)
+	}
+	if len(decoded.Tools) == 0 {
+		t.Fatal("tools/list is empty")
+	}
+	for _, tool := range decoded.Tools {
+		if strings.HasPrefix(tool.Name, "lua_") {
+			t.Errorf("tool %q registered without WithLuaTools", tool.Name)
+		}
+	}
+
+	_, rpcErr = dispatch(t, srv, "tools/call", `{"name":"lua_eval","arguments":{"code":"return 1"}}`)
+	if rpcErr == nil {
+		t.Error("lua_eval dispatched on a server built without WithLuaTools")
+	}
+
+	noLua := newTestDeps(t, meta, st)
+	noLua.LuaWriteDeps = lua.WriteDeps{}
+	if _, err := NewServer(noLua, "test",
+		WithPrincipal(principal.Principal{User: "tester", Tool: principal.ToolMCP}), WithLuaTools()); err == nil {
+		t.Error("NewServer accepted WithLuaTools without LuaWriteDeps")
 	}
 }
 

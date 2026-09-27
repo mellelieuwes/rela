@@ -39,7 +39,8 @@ func (c *McpCmd) Run() error {
 		User: principal.SystemUser(),
 		Tool: principal.ToolMCP,
 	}
-	srv, srvErr := relamcp.NewServer(svc.Deps(), Version, relamcp.WithPrincipal(mcpPrincipal))
+	srv, srvErr := relamcp.NewServer(svc.Deps(), Version,
+		relamcp.WithPrincipal(mcpPrincipal), relamcp.WithLuaTools())
 	if srvErr != nil {
 		return fmt.Errorf("mcp startup: %w", srvErr)
 	}

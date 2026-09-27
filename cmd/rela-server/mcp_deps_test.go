@@ -3,9 +3,15 @@
 package main
 
 import (
+	"context"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+
+	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Sourcehaven-BV/rela/internal/appbuild"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
@@ -36,10 +42,10 @@ assignments:
 `
 
 // TestRemoteMCPDeps_UsesGatedHandles (TKT-4QSZ8Y) pins the wiring: under a
-// policy, every read handle the remote MCP server gets is gated, and the Lua
-// tools get no elevated handle and no shared cache. The per-handle behavior is
-// tested in internal/mcp and internal/appbuild; this test catches a wiring
-// site that hands out a raw handle instead.
+// policy, every read handle the remote MCP server gets is gated. The
+// per-handle behavior is tested in internal/mcp and internal/appbuild; this
+// test catches a wiring site that hands out a raw handle instead. It also
+// pins that the remote server offers no Lua tools (BUG-RIJR6R).
 func TestRemoteMCPDeps_UsesGatedHandles(t *testing.T) {
 	root := t.TempDir()
 	for _, d := range []string{"entities", "relations", filepath.Join(".rela", "audit")} {
@@ -76,17 +82,56 @@ func TestRemoteMCPDeps_UsesGatedHandles(t *testing.T) {
 	if deps.Tracer == svc.Tracer() {
 		t.Error("Tracer is the raw tracer")
 	}
-	lw := deps.LuaWriteDeps
-	if _, ok := lw.VisibleReader.(*visibility.UnrestrictedReader); ok || lw.VisibleReader == nil {
-		t.Errorf("Lua VisibleReader = %T, want a gated reader", lw.VisibleReader)
-	}
-	if _, ok := lw.Searcher.(*visibility.Searcher); !ok {
-		t.Errorf("Lua Searcher = %T, want *visibility.Searcher", lw.Searcher)
-	}
-	if lw.ElevatedReader != nil || lw.ElevatedManager != nil {
-		t.Error("Lua tools got an elevated handle; a remote caller could use rela.bypass_acl")
+	if deps.LuaWriteDeps.EntityManager != nil || deps.LuaWriteDeps.VisibleReader != nil {
+		t.Error("LuaWriteDeps is set; the remote server has no Lua tools")
 	}
 	if deps.LuaCache != nil {
-		t.Error("LuaCache is set; the shared cache is not keyed by principal")
+		t.Error("LuaCache is set; the remote server has no Lua tools")
+	}
+
+	assertNoLuaTools(t, svc)
+}
+
+// assertNoLuaTools builds the server through the production constructor,
+// serves it over HTTP and checks that no lua_* tool is listed or callable
+// (BUG-RIJR6R).
+func assertNoLuaTools(t *testing.T, svc *appbuild.Services) {
+	t.Helper()
+	ctx := context.Background()
+
+	srv, err := newRemoteMCPServer(svc, dataentry.MCPHost{WriteLock: &sync.Mutex{}})
+	if err != nil {
+		t.Fatalf("newRemoteMCPServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.HTTPHandler())
+	t.Cleanup(ts.Close)
+
+	client := mcpgo.NewClient(&mcpgo.Implementation{Name: "test", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, &mcpgo.StreamableClientTransport{
+		Endpoint: ts.URL, DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("tools/list: %v", err)
+	}
+	if len(tools.Tools) == 0 {
+		t.Fatal("tools/list is empty")
+	}
+	for _, tool := range tools.Tools {
+		if strings.HasPrefix(tool.Name, "lua_") {
+			t.Errorf("remote MCP lists %s", tool.Name)
+		}
+	}
+
+	res, err := cs.CallTool(ctx, &mcpgo.CallToolParams{
+		Name: "lua_eval", Arguments: map[string]any{"code": "return 1"},
+	})
+	if err == nil && !res.IsError {
+		t.Error("remote MCP ran lua_eval")
 	}
 }
