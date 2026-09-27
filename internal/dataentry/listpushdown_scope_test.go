@@ -39,6 +39,9 @@ entities:
       chain: "related(entity, {'implements', 'ownedBy'})"
       mine: "is_current_user(entity.assignee) and related(entity, 'implements')"
       not-reported: "not related(entity, 'reportedBy')"
+      mine-reported: "related(entity, 'reportedBy', { id = current_user.id })"
+      mine-owned-open: "entity.status == 'open' and related(entity, {'implements', 'ownedBy'}, { id = current_user.id })"
+      not-mine-reported: "not related(entity, 'reportedBy', { id = current_user.id })"
   feature:
     label: Feature
     plural: features
@@ -64,6 +67,7 @@ relations:
 // lowerableScopes are the fixture's scopes that queryplan.LowerScope accepts.
 var lowerableScopes = map[string]bool{
 	"impl-open": true, "reported": true, "open-reported-impl": true, "chain": true, "mine": true,
+	"mine-reported": true, "mine-owned-open": true,
 }
 
 // newScopePushdownApp seeds twelve tickets over a counting store. Every
@@ -153,7 +157,10 @@ func TestListPushdown_ScopeMatchesGoPath(t *testing.T) {
 // list API and compares each page and total with the Go path.
 func assertScopeMatchesGoPath(t *testing.T, app *App, d *acl.Declarative, counting *storetest.Counting) {
 	t.Helper()
-	scopes := []string{"impl-open", "reported", "open-reported-impl", "chain", "mine", "not-reported"}
+	scopes := []string{
+		"impl-open", "reported", "open-reported-impl", "chain", "mine", "not-reported",
+		"mine-reported", "mine-owned-open", "not-mine-reported",
+	}
 	for _, user := range []string{"alice", "bob", "dave", "erin"} {
 		for _, scope := range scopes {
 			for _, rq := range []string{"", "sort=title", "sort=-title", "filter%5Bstatus%5D=open&sort=title"} {
@@ -309,5 +316,44 @@ func TestPosition_ScopeMatchesGoPath(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A traversal constrained by current_user.id answers per caller, in the store.
+// The equivalence harness above proves the pushed page equals the Go page;
+// this pins what the page IS, so both paths returning nothing cannot pass.
+func TestListPushdown_CurrentUserTraversal(t *testing.T) {
+	app, d, counting := newScopePushdownApp(t)
+	for _, tc := range []struct {
+		user, scope string
+		want        []string
+	}{
+		// alice reports TKT-04, 08 and 12; dave reports 02, 06 and 10.
+		{"alice", "mine-reported", []string{"TKT-04", "TKT-08", "TKT-12"}},
+		{"bob", "mine-reported", nil},
+		// dave may not read users, so his own reports do not count.
+		{"dave", "mine-reported", nil},
+		// alice owns FEAT-1, bob FEAT-3; only open tickets implementing them.
+		{"alice", "mine-owned-open", []string{"TKT-06"}},
+		{"bob", "mine-owned-open", []string{"TKT-02"}},
+	} {
+		t.Run(tc.user+" "+tc.scope, func(t *testing.T) {
+			counting.Reset()
+			resp, rec := listEntitiesAs(principalCtx(tc.user), t, app, d, "ticket", "tickets",
+				"query_scope="+tc.scope+"&per_page=50")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body)
+			}
+			var got []string
+			for _, e := range resp.Data {
+				got = append(got, e.ID)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") || resp.Meta.Total != len(tc.want) {
+				t.Fatalf("got %v (total %d), want %v", got, resp.Meta.Total, tc.want)
+			}
+			if tc.user != "dave" && (counting.Calls()["CountMatched"] != 1 || counting.Calls()["MatchingIDs"] != 0) {
+				t.Errorf("expected the pushed path: %s", counting)
+			}
+		})
 	}
 }

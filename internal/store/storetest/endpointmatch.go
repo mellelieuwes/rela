@@ -306,6 +306,44 @@ func runInboundEndpointMatchTests(t *testing.T, f Factory) {
 		require.Equal(t, []string{"FEAT-2", "FEAT-3", "FEAT-4"}, got)
 	})
 
+	// The related(entity, rel, { id = current_user.id }) shape (TKT-NXELMW):
+	// the bound user id arrives as Endpoints on the FROM side, and the hop's
+	// target type as EndpointMatch.EntityType. The two are a conjunction.
+	namedTicket := func(id string, negate bool) *store.RelationPredicate {
+		return &store.RelationPredicate{
+			OfTypes: []string{"implements"}, Endpoints: []string{id}, Negate: negate,
+			EndpointMatch: &store.EndpointPredicate{EntityType: "ticket"},
+		}
+	}
+	for _, tc := range []struct {
+		name, endpoint string
+		negate         bool
+		want           []string
+	}{
+		{"HasInbound_named_endpoint_of_type", "TKT-done", false, []string{"FEAT-2"}},
+		{"HasInbound_named_endpoint_of_type_negated", "TKT-done", true, []string{"FEAT-1", "FEAT-3", "FEAT-4"}},
+		// The id names a row of another type: the type check still applies.
+		{"HasInbound_named_endpoint_of_other_type", "FEAT-1", false, nil},
+		// The id names the dangling FROM of FEAT-3's edge: no row, no match.
+		{"HasInbound_named_dangling_endpoint", "TKT-missing", false, nil},
+		{"HasInbound_named_dangling_endpoint_negated", "TKT-missing", true,
+			[]string{"FEAT-1", "FEAT-2", "FEAT-3", "FEAT-4"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := f(t)
+			seed(t, s)
+			got := runGraphQuery(t, s, store.GraphQuery{
+				EntityType: "feature",
+				HasInbound: namedTicket(tc.endpoint, tc.negate),
+			})
+			if tc.want == nil {
+				require.Empty(t, got)
+				return
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+
 	t.Run("chain_inbound_then_inbound", func(t *testing.T) {
 		s := f(t)
 		seed(t, s)

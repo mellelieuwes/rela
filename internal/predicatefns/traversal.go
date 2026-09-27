@@ -54,7 +54,51 @@ func validateTraversal(meta *metamodel.Metamodel, fromType string, spec predicat
 	if err != nil {
 		return err
 	}
+	if err := validateTraversalRefs(spec); err != nil {
+		return err
+	}
 	return validateTraversalProps(meta, target, spec)
+}
+
+// validateTraversalRefs allows exactly one variable as a constraint value:
+// current_user.id. It is the only value that is constant for a request AND
+// that every surface answering a traversal can bind the same way
+// ([BindTraversal] reads the identity [BindCurrentUser] binds). current_user.tool
+// is refused for the reason ConditionPrefilters refuses it: it describes the
+// transport, and must not become a membership input.
+func validateTraversalRefs(spec predicate.TraversalSpec) error {
+	for key, ref := range spec.Refs {
+		if ref.Var != VarCurrentUser || ref.Field != FieldCurrentUserID {
+			return fmt.Errorf("related: %q compares against %s.%s; the only variable a constraint may read is %s.%s",
+				key, ref.Var, ref.Field, VarCurrentUser, FieldCurrentUserID)
+		}
+	}
+	return nil
+}
+
+// BindTraversal returns spec with its `current_user.id` constraints replaced
+// by identity, for a caller that answers or lowers the traversal outside
+// Eval. identity is the value [BindCurrentUser] binds to current_user.id for
+// the same request, so the answer and the evaluation read one identity.
+//
+// A spec with no Refs is returned unchanged. An empty identity is
+// [ErrNoCurrentUser], never an unbound spec: an id constraint left empty
+// lowers to an endpoint set the store reads as "any endpoint".
+func BindTraversal(spec predicate.TraversalSpec, identity string) (predicate.TraversalSpec, error) {
+	if len(spec.Refs) == 0 {
+		return spec, nil
+	}
+	if err := validateTraversalRefs(spec); err != nil {
+		return predicate.TraversalSpec{}, err
+	}
+	if identity == "" {
+		return predicate.TraversalSpec{}, ErrNoCurrentUser
+	}
+	values := make(map[string]predicate.Value, len(spec.Refs))
+	for key := range spec.Refs {
+		values[key] = predicate.NewString(identity)
+	}
+	return spec.Bind(values)
 }
 
 // ResolvedHop is one hop of a traversal after the metamodel has resolved it:
@@ -211,7 +255,9 @@ func resolveHopTarget(name string, far []string, last bool, ascribed string) (st
 }
 
 // validateTraversalProps checks each constrained property is declared on the
-// resolved target type and is pushdown-eligible.
+// resolved target type and is pushdown-eligible. The `id` key is not a
+// property: the engine has already required a non-empty string for it, and
+// it lowers to an endpoint id rather than a property comparison.
 //
 // Refusing an ineligible property is load-bearing, not fussiness. The whole
 // point of the form is that it pushes into SQL; a property the store cannot
@@ -244,6 +290,17 @@ func validateTraversalProps(meta *metamodel.Metamodel, targetType string, spec p
 			// match in SQL while matching in Go.
 			return fmt.Errorf("related: property %q on %q has type %q, which cannot be compared in a traversal",
 				name, targetType, pd.Type)
+		}
+		if _, isRef := spec.Refs[name]; isRef {
+			// Bound per request; validateTraversalRefs has checked what it
+			// reads, and an empty value is refused when it is bound. A user
+			// id is never a declared enum value, so on an enum it would match
+			// nothing and `not related(...)` would match every row.
+			if enumValues(meta, pd) != nil {
+				return fmt.Errorf("related: property %q on %q is an enum and cannot be compared "+
+					"against current_user", name, targetType)
+			}
+			continue
 		}
 		str, ok := spec.Props[name].(predicate.String)
 		if !ok {

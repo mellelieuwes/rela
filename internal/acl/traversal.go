@@ -36,6 +36,15 @@ type TraversalHop struct {
 	// Props are the endpoint property filters the author wrote.
 	Props []store.PropPredicate
 
+	// EndpointIDs restricts the hop to the entities with these ids, as
+	// [store.RelationPredicate.Endpoints]. Nil leaves the id unconstrained.
+	//
+	// Non-nil but EMPTY is refused rather than lowered: the store reads an
+	// empty Endpoints as "any endpoint", so a caller that meant "this id" and
+	// lost the id (an unresolved current user, say) would otherwise widen the
+	// hop to every related entity. A blank id is refused for the same reason.
+	EndpointIDs []string
+
 	// Next chains one hop further. Nil ends the chain.
 	Next *TraversalHop
 }
@@ -89,6 +98,11 @@ func UngatedTraversal(hop TraversalHop) (*store.RelationPredicate, error) {
 func lowerTraversal(
 	hop TraversalHop, endpoint func(TraversalHop) (*store.EndpointPredicate, error),
 ) (*store.RelationPredicate, error) {
+	if hop.EndpointIDs != nil && (len(hop.EndpointIDs) == 0 || slices.Contains(hop.EndpointIDs, "")) {
+		// Not ErrTraversalUnsupported: this is no principal's grant shape but
+		// a caller that lost the id, and it must fail as an internal error.
+		return nil, fmt.Errorf("acl: traversal hop into %q names an empty endpoint id", hop.EntityType)
+	}
 	match, err := endpoint(hop)
 	if err != nil {
 		return nil, err
@@ -112,7 +126,9 @@ func lowerTraversal(
 		}
 		*slot = nested
 	}
-	return &store.RelationPredicate{OfTypes: hop.RelationTypes, EndpointMatch: match}, nil
+	return &store.RelationPredicate{
+		OfTypes: hop.RelationTypes, Endpoints: slices.Clone(hop.EndpointIDs), EndpointMatch: match,
+	}, nil
 }
 
 // GateTraversal compiles an untrusted traversal request into a store

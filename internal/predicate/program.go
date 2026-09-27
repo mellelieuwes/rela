@@ -101,6 +101,12 @@ func (p *Program) inspect() {
 			// host function.
 			p.traversals = append(p.traversals, x.spec)
 			visit(x.subject)
+			// A constraint value read from a variable is a dependency on it:
+			// `{ id = current_user.id }` makes the program need an identity,
+			// exactly as `entity.x == current_user.id` does.
+			for _, ref := range x.refs {
+				visit(ref)
+			}
 		case *tableArgNode:
 			p.sqlPortable = false
 		case *relationalNode:

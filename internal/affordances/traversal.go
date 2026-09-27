@@ -172,3 +172,23 @@ func warnConditionallyVisible(
 		}
 	}
 }
+
+// refuseIdentityTraversal refuses a `when:` traversal constrained by
+// current_user.id.
+//
+// A grant's traversals are answered by the binder, which reads the identity
+// from the request context, while the grant itself binds current_user from
+// this resolver's own principal resolution. Two derivations of "who is
+// calling" would only ever disagree by failing the grant, but a grant is
+// authorization, and it must not depend on them agreeing. Relation
+// ownership as an authorization input is what `role_relations:` is for.
+func refuseIdentityTraversal(prog *predicate.Program) error {
+	for _, spec := range prog.Traversals() {
+		if len(spec.Refs) > 0 {
+			return fmt.Errorf("%s(...) cannot compare against %s.%s in acl.yaml; use role_relations to grant "+
+				"through a relation to the user", predicate.FuncRelated, predicatefns.VarCurrentUser,
+				predicatefns.FieldCurrentUserID)
+		}
+	}
+	return nil
+}

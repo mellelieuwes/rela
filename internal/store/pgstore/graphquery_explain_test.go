@@ -284,6 +284,64 @@ func traversalExplainProgram(t *testing.T) *predicate.Program {
 	return prog
 }
 
+// TestInboundNamedEndpointExplainIsIndexed pins the plan of the
+// related(entity, rel, { id = current_user.id }) shape (TKT-NXELMW): the bound
+// user id is an inbound Endpoints entry and the traversed type an
+// EndpointMatch. It needs no derived index; the relation key serves it, so
+// neither the query nor a page's MatchingIDs may scan relations.
+func TestInboundNamedEndpointExplainIsIndexed(t *testing.T) {
+	pool := newScopedPool(t)
+	s, err := pgstore.New(pool)
+	require.NoError(t, err)
+	ctx := context.Background()
+	for i := range 50 {
+		require.NoError(t, s.CreateEntity(ctx, entity.New(fmt.Sprintf("PER-%06d", i), "persoon")))
+	}
+	for i := range 5000 {
+		id := fmt.Sprintf("TAAK-%06d", i)
+		require.NoError(t, s.CreateEntity(ctx, entity.New(id, "taak")))
+		_, err = s.CreateRelation(ctx, fmt.Sprintf("PER-%06d", i%50), "verantwoordelijk_voor", id, nil)
+		require.NoError(t, err)
+	}
+	_, err = pool.Exec(ctx, "ANALYZE entities; ANALYZE relations")
+	require.NoError(t, err)
+
+	q := store.GraphQuery{
+		EntityType: "taak",
+		HasInbound: &store.RelationPredicate{
+			OfTypes:       []string{"verantwoordelijk_voor"},
+			Endpoints:     []string{"PER-000007"},
+			EndpointMatch: &store.EndpointPredicate{EntityType: "persoon"},
+		},
+	}
+	plan := explainGraphQuery(t, pool, q)
+	t.Logf("plan:\n%s", plan)
+	if strings.Contains(plan, "Seq Scan on relations") {
+		t.Fatalf("a named inbound endpoint scans relations:\n%s", plan)
+	}
+
+	page := make([]string, 50)
+	for i := range page {
+		page[i] = fmt.Sprintf("TAAK-%06d", i)
+	}
+	sqlText, args := pgstore.BuildMatchingIDsSQLForTest(q, page)
+	rows, err := pool.Query(ctx, "EXPLAIN "+sqlText, args...)
+	require.NoError(t, err)
+	var lines []string
+	for rows.Next() {
+		var line string
+		require.NoError(t, rows.Scan(&line))
+		lines = append(lines, line)
+	}
+	rows.Close()
+	require.NoError(t, rows.Err())
+	idsPlan := strings.Join(lines, "\n")
+	t.Logf("MatchingIDs plan:\n%s", idsPlan)
+	if strings.Contains(idsPlan, "Seq Scan on entities") || strings.Contains(idsPlan, "Seq Scan on relations") {
+		t.Fatalf("MatchingIDs for a named inbound endpoint scans a table:\n%s", idsPlan)
+	}
+}
+
 // TestInboundEndpointMatchExplainUsesDerivedIndex is the incoming-hop twin of
 // [TestEndpointMatchExplainUsesDerivedIndex] (TKT-CXQEV0): a feature filtered
 // on the tickets that implement it. The endpoint is the relation's FROM side,

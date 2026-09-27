@@ -57,6 +57,11 @@ func (w nextActionMatcher) MatchAllWith(
 	for _, t := range w.m.Types() {
 		prog, _ := w.m.Program(t)
 		b, err := bindPage(ctx, w.meta, gate, match, t, es, prog)
+		if errors.Is(err, predicatefns.ErrNoCurrentUser) {
+			// A related() constraint on current_user.id is answered here,
+			// before any row is matched.
+			return nil, fmt.Errorf("%w: %w", nextaction.ErrIdentityRequired, err)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -148,9 +153,11 @@ func nextActionRequestScope(ctx context.Context) (context.Context, error) {
 // One degradation is inherited from the router and worth knowing: when the
 // principal_property lookup fails with a BACKEND error, resolvePrincipalEntity
 // keeps the raw principal, so this derives the raw identifier while the
-// operator's condition compares against user-entity ids. The source then
-// matches NOTHING for that request (narrowing, never widening) rather than
-// erroring; predicatefns.ResolveQueryIdentity is the stricter shape the
+// operator's condition compares against user-entity ids. A positive
+// identity comparison then matches nothing for that request rather than
+// erroring, and a negated one (`not related(..., { id = current_user.id })`)
+// matches every row the reader can already see. Neither reaches past the read
+// gate; predicatefns.ResolveQueryIdentity is the stricter shape the
 // boundary stamp (TKT-ZQV9O5) should adopt.
 func queryIdentityFor(ctx context.Context) (predicatefns.QueryIdentity, bool) {
 	p, ok := principal.Stamped(ctx)

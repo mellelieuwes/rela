@@ -44,6 +44,9 @@ func progFor(t *testing.T, src string) *predicate.Program {
 	if err := env.DeclareVar("entity", predicate.RecordType{"status": predicate.StringType}); err != nil {
 		t.Fatal(err)
 	}
+	if err := predicatefns.DeclareCurrentUser(env); err != nil {
+		t.Fatal(err)
+	}
 	p, err := predicate.Compile(env, src)
 	if err != nil {
 		t.Fatalf("compile %q: %v", src, err)
@@ -81,6 +84,39 @@ func TestTraversalIndexSpecs_ChainIndexesTheFinalType(t *testing.T) {
 		traversalIndexMeta(), "ticket")
 	if len(got) != 1 || got[0].Type != "person" {
 		t.Fatalf("expected one spec on person, got %+v", got)
+	}
+}
+
+// An `id` constraint is answered by the relation's endpoint column, which the
+// relations indexes already serve, so it derives no property index: an index
+// on a property nobody filters on would be reconciled and never used. A
+// property compared against current_user.id is still a property filter, and
+// is indexed like a literal one.
+func TestTraversalIndexSpecs_IDDerivesNoPropertyIndex(t *testing.T) {
+	meta := traversalIndexMeta()
+	for _, tc := range []struct {
+		name, src string
+		want      []string
+	}{
+		{"literal id", `related(entity, { 'derives', 'about' }, { id = 'alice' })`, nil},
+		{"current_user id", `related(entity, { 'derives', 'about' }, { id = current_user.id })`, nil},
+		{"id beside a property", `related(entity, { 'derives', 'about' }, { id = current_user.id, name = 'a' })`,
+			[]string{"name"}},
+		{"property from current_user", `related(entity, { 'derives', 'about' }, { name = current_user.id })`,
+			[]string{"name"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := TraversalIndexSpecs(progFor(t, tc.src), meta, "ticket")
+			if tc.want == nil {
+				if len(got) != 0 {
+					t.Fatalf("expected no spec, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Type != "person" || !slices.Equal(got[0].Properties, tc.want) {
+				t.Fatalf("got %+v, want one spec on person with %v", got, tc.want)
+			}
+		})
 	}
 }
 

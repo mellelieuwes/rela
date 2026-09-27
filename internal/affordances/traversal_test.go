@@ -191,6 +191,14 @@ func TestResolver_RelatedRefusedAtLoad(t *testing.T) {
 		affordances.WithTraversals(&stubBinder{})); err == nil {
 		t.Error("unknown relation: want a compile error")
 	}
+	// A grant must not depend on a traversal bound to the caller's identity;
+	// see refuseIdentityTraversal.
+	mine := policyFromYAML(t, strings.Replace(relatedPolicy,
+		"'implements')", "'implements', { id = current_user.id })", 1))
+	_, err := affordances.New(testMeta(t), newStubLookup(), declFor(t, mine), affordances.WithTraversals(&stubBinder{}))
+	if err == nil || !strings.Contains(err.Error(), "role_relations") {
+		t.Errorf("current_user in a when: traversal: want a compile error naming role_relations, got %v", err)
+	}
 }
 
 // A transition verdict is served to principals like a grant's, so a transition

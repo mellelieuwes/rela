@@ -462,3 +462,84 @@ func TestFoldsIntoEndpoint(t *testing.T) {
 		t.Fatal("HasOutbound must not fold")
 	}
 }
+
+// EndpointIDs lowers to the hop's Endpoints on the gated and the ungated path
+// alike, on the first hop and on a chained one, and composes with the
+// endpoint's read gate rather than replacing it. An empty or blank id set is
+// refused: the store reads empty Endpoints as "any endpoint", so lowering it
+// would widen a hop the caller meant to pin to one entity.
+func TestTraversal_EndpointIDs(t *testing.T) {
+	d, ctx := gateFixture(t, &Policy{
+		Roles:       map[string]RoleDef{"reader": {Read: []string{"ticket", "user", "concept"}}},
+		Assignments: map[string]string{"alice": "reader"},
+	})
+	gated := func(hop TraversalHop) (*store.RelationPredicate, error) {
+		return requestFor(t, d, "alice").GateTraversal(ctx, "ticket", hop)
+	}
+	for _, lower := range []struct {
+		name string
+		fn   func(TraversalHop) (*store.RelationPredicate, error)
+	}{{"gated", gated}, {"ungated", UngatedTraversal}} {
+		t.Run(lower.name, func(t *testing.T) {
+			got, err := lower.fn(TraversalHop{
+				RelationTypes: []string{"owns"}, Incoming: true, EntityType: "user", EndpointIDs: []string{"alice"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Endpoints) != 1 || got.Endpoints[0] != "alice" || got.EndpointMatch.EntityType != "user" {
+				t.Fatalf("single hop: %+v", got)
+			}
+
+			got, err = lower.fn(TraversalHop{
+				RelationTypes: []string{"caused-by"}, EntityType: "concept",
+				Next: &TraversalHop{
+					RelationTypes: []string{"owned-by"}, EntityType: "user", EndpointIDs: []string{"alice"},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Endpoints) != 0 {
+				t.Fatalf("the first hop must stay unconstrained: %+v", got)
+			}
+			next := got.EndpointMatch.HasOutbound
+			if next == nil || len(next.Endpoints) != 1 || next.Endpoints[0] != "alice" {
+				t.Fatalf("chained hop: %+v", got.EndpointMatch)
+			}
+
+			if got, err := lower.fn(TraversalHop{RelationTypes: []string{"owns"}, EntityType: "user"}); err != nil ||
+				got.Endpoints != nil {
+
+				t.Fatalf("nil EndpointIDs must leave Endpoints nil: %v %+v", err, got)
+			}
+
+			for _, ids := range [][]string{{}, {""}, {"alice", ""}} {
+				_, err := lower.fn(TraversalHop{RelationTypes: []string{"owns"}, EntityType: "user", EndpointIDs: ids})
+				if err == nil {
+					t.Errorf("EndpointIDs %q must be refused", ids)
+				}
+				_, err = lower.fn(TraversalHop{
+					RelationTypes: []string{"caused-by"}, EntityType: "concept",
+					Next: &TraversalHop{RelationTypes: []string{"owned-by"}, EntityType: "user", EndpointIDs: ids},
+				})
+				if err == nil {
+					t.Errorf("chained EndpointIDs %q must be refused", ids)
+				}
+			}
+		})
+	}
+
+	// A principal who may not read the endpoint type is still denied: naming
+	// an id is no way around the row gate.
+	d2, ctx2 := gateFixture(t, &Policy{
+		Roles:       map[string]RoleDef{"reader": {Read: []string{"ticket"}}},
+		Assignments: map[string]string{"bob": "reader"},
+	})
+	_, err := requestFor(t, d2, "bob").GateTraversal(ctx2, "ticket", TraversalHop{
+		RelationTypes: []string{"owns"}, Incoming: true, EntityType: "user", EndpointIDs: []string{"bob"},
+	})
+	if !errors.Is(err, ErrTraversalDenied) {
+		t.Fatalf("want ErrTraversalDenied, got %v", err)
+	}
+}

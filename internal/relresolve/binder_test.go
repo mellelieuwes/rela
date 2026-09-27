@@ -8,6 +8,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/acl"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/predicate"
+	"github.com/Sourcehaven-BV/rela/internal/predicatefns"
 	"github.com/Sourcehaven-BV/rela/internal/relresolve"
 	"github.com/Sourcehaven-BV/rela/internal/store"
 )
@@ -207,5 +208,91 @@ func TestBinder_EmptyIDIsAnError(t *testing.T) {
 func TestNewStoreBinder_RejectsNilStore(t *testing.T) {
 	if _, err := relresolve.NewStoreBinder(meta(), relresolve.Ungated, nil); err == nil {
 		t.Fatal("want an error for a nil store")
+	}
+}
+
+func compileWithUser(t *testing.T, src string) *predicate.Program {
+	t.Helper()
+	env := predicate.NewEnv()
+	if err := env.DeclareVar("entity", predicate.RecordType{"id": predicate.StringType}); err != nil {
+		t.Fatal(err)
+	}
+	if err := predicatefns.DeclareCurrentUser(env); err != nil {
+		t.Fatal(err)
+	}
+	prog, err := predicate.Compile(env, src)
+	if err != nil {
+		t.Fatalf("compile %q: %v", src, err)
+	}
+	return prog
+}
+
+// An `id` constraint lowers to the final hop's EndpointIDs, and a spec that
+// still reads current_user cannot be lowered at all.
+func TestHop_ID(t *testing.T) {
+	spec := compileWithUser(t, `related(entity, {'blocks', 'owned-by'}, { id = 'alice' })`).Traversals()[0]
+	hop, err := relresolve.Hop(meta(), "ticket", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hop.EndpointIDs != nil || hop.Next == nil || len(hop.Next.EndpointIDs) != 1 || hop.Next.EndpointIDs[0] != "alice" {
+		t.Fatalf("the id must constrain the final hop only: %+v / %+v", hop, hop.Next)
+	}
+
+	unbound := compileWithUser(t, `related(entity, 'owned-by', { id = current_user.id })`).Traversals()[0]
+	if _, err := relresolve.Hop(meta(), "ticket", unbound); err == nil {
+		t.Fatal("an unbound current_user constraint must not lower")
+	}
+}
+
+// Answer binds current_user.id from the request's query identity, the one
+// BindCurrentUser reads. Without one it fails before touching the gate or the
+// store: answering would need an endpoint id, and none must never become
+// "any endpoint".
+func TestAnswer_BindsCurrentUserFromTheRequest(t *testing.T) {
+	prog := compileWithUser(t, `related(entity, 'owned-by', { id = current_user.id })`)
+	var seen store.GraphQuery
+	gates := 0
+	gate := func(_ context.Context, _ string, hop acl.TraversalHop) (*store.RelationPredicate, error) {
+		gates++
+		return acl.UngatedTraversal(hop)
+	}
+	match := func(_ context.Context, q store.GraphQuery, _ []string) (map[string]bool, error) {
+		seen = q
+		return map[string]bool{"TKT-1": true, "TKT-2": false}, nil
+	}
+
+	_, err := relresolve.Answer(context.Background(), meta(), gate, match, "ticket", prog.Traversals(),
+		[]string{"TKT-1"})
+	if !errors.Is(err, predicatefns.ErrNoCurrentUser) || gates != 0 {
+		t.Fatalf("no identity: err = %v, gate calls = %d; want ErrNoCurrentUser before any gate call", err, gates)
+	}
+
+	ctx := predicatefns.WithQueryIdentity(context.Background(), predicatefns.QueryIdentity{EntityID: "alice"})
+	answers, err := relresolve.Answer(ctx, meta(), gate, match, "ticket", prog.Traversals(),
+		[]string{"TKT-1", "TKT-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen.HasOutbound == nil || len(seen.HasOutbound.Endpoints) != 1 || seen.HasOutbound.Endpoints[0] != "alice" {
+		t.Fatalf("the store query must name alice as the endpoint: %+v", seen.HasOutbound)
+	}
+
+	// The row is evaluated with the spec bound to the same identity...
+	bound, err := predicatefns.BindTraversal(prog.Traversals()[0], "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, forErr := answers.For("TKT-1")(row("TKT-1"), bound); forErr != nil || !ok {
+		t.Fatalf("TKT-1: %v %v", ok, forErr)
+	}
+	// ...and a spec bound to anyone else finds no answer and fails, rather
+	// than reading alice's.
+	other, err := predicatefns.BindTraversal(prog.Traversals()[0], "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := answers.For("TKT-1")(row("TKT-1"), other); err == nil {
+		t.Fatal("an answer computed for alice must not serve bob")
 	}
 }

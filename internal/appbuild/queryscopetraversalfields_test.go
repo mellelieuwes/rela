@@ -8,7 +8,9 @@ import (
 )
 
 // traversalFieldSchema scopes a feature on the status and the owner of the
-// tickets implementing it, walking the relation backwards.
+// tickets implementing it, walking the relation backwards. mine-live filters
+// owner by the current user; by-id names the ticket itself, which reads no
+// property and so is never flagged.
 const traversalFieldSchema = `version: "1.0"
 entities:
   feature:
@@ -22,6 +24,8 @@ entities:
     query_scopes:
       busy: "related(entity, 'implementedBy', { status = 'in-progress' })"
       mine: "related(entity, 'implementedBy', { owner = 'bob' })"
+      mine-live: "related(entity, 'implementedBy', { owner = current_user.id })"
+      by-id: "related(entity, 'implementedBy', { id = current_user.id })"
   ticket:
     label: Ticket
     plural: tickets
@@ -44,7 +48,8 @@ func TestQueryScopeTraversalFieldErrors(t *testing.T) {
 	cases := []struct {
 		name   string
 		policy string
-		want   []string // substrings; empty means no errors
+		want   []string // substrings of the first error; empty means no errors
+		count  int      // number of errors when want is set; 0 means 1
 	}{
 		{name: "no policy"},
 		{
@@ -67,7 +72,9 @@ assignments:
 assignments:
   bob: viewer
 `,
-			want: []string{`query scope "mine"`, `"owner"`, `"ticket"`},
+			// A current_user value filters owner just as a literal does.
+			want:  []string{`query scope "mine"`, `"owner"`, `"ticket"`},
+			count: 2,
 		},
 		{
 			name: "conditional grant on status",
@@ -95,8 +102,9 @@ assignments:
 				}
 				return
 			}
-			if len(got) != 1 {
-				t.Fatalf("want 1 error, got %d: %v", len(got), got)
+			count := max(tc.count, 1)
+			if len(got) != count {
+				t.Fatalf("want %d errors, got %d: %v", count, len(got), got)
 			}
 			for _, w := range tc.want {
 				if !strings.Contains(got[0], w) {

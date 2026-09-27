@@ -2504,6 +2504,10 @@ next_actions:
 - `has_current_user(entity.watchers)` — membership, for a **list** property:
   true when the current user is one of the values. (Lists cannot be compared
   with `==`; this is the way to ask.)
+- `related(entity, 'heeft_verantwoordelijke', { id = current_user.id })` — for
+  ownership held in a **relation** rather than a property: true when the walk
+  reaches the current user's entity. See
+  [Matching the current user](metamodel.md#matching-the-current-user).
 
 `current_user.id` is the user **entity id** when your ACL policy declares a
 `user_entity_type` and the signed-in principal resolves to one of its

@@ -41,7 +41,11 @@ type ScopeLowering struct {
 //     integer, boolean or list, or `id`) declines
 //   - `current_user.tool` declines, as in [ConditionPrefilters]
 //   - a `current_user` reference with no identity declines, so the Go path
-//     can fail the request closed rather than this matching the unset rows
+//     can fail the request closed rather than this matching the unset rows.
+//     That includes a traversal constrained by `current_user.id`: the
+//     returned Traversals are BOUND to identity, and a traversal that cannot
+//     be bound is never returned unbound, since its id would lower to an
+//     empty endpoint set, which a store reads as "any endpoint"
 //
 // identity is the request's query identity, empty when there is none. It is
 // an argument, never state: the resolver that calls this is shared across
@@ -79,5 +83,13 @@ func LowerScope(
 			Property: eq.Attribute, Op: store.PropEqual, Value: value, Scalar: true,
 		})
 	}
-	return ScopeLowering{Props: props, Traversals: traversals}, true
+	bound := make([]predicate.TraversalSpec, 0, len(traversals))
+	for _, spec := range traversals {
+		b, err := predicatefns.BindTraversal(spec, identity)
+		if err != nil {
+			return ScopeLowering{}, false
+		}
+		bound = append(bound, b)
+	}
+	return ScopeLowering{Props: props, Traversals: bound}, true
 }

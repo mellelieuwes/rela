@@ -266,6 +266,42 @@ relations:
 		"MatchingIDs is not driven by the page's id list")
 }
 
+// The related(entity, rel, { id = current_user.id }) shape (TKT-NXELMW): the
+// bound user id is an inbound Endpoints entry and the traversed type an
+// EndpointMatch. Neither the full query nor a page's MatchingIDs may scan a
+// table, and no derived index is needed for it.
+func TestInboundNamedEndpointExplainIsIndexOnly(t *testing.T) {
+	s := open(t)
+	seed(t, s, func(v store.Store) {
+		for i := range 50 {
+			mustCreate(t, v, entity.New(fmt.Sprintf("PER-%06d", i), "persoon"))
+		}
+		for i := range 2000 {
+			id := fmt.Sprintf("TAAK-%06d", i)
+			mustCreate(t, v, entity.New(id, "taak"))
+			mustRelate(t, v, fmt.Sprintf("PER-%06d", i%50), "verantwoordelijk_voor", id)
+		}
+	})
+	q := store.GraphQuery{
+		EntityType: "taak",
+		HasInbound: &store.RelationPredicate{
+			OfTypes:       []string{"verantwoordelijk_voor"},
+			Endpoints:     []string{"PER-000007"},
+			EndpointMatch: &store.EndpointPredicate{EntityType: "persoon"},
+		},
+	}
+	requireNoTableScan(t, explain(t, s, q))
+
+	page := make([]string, 50)
+	for i := range page {
+		page[i] = fmt.Sprintf("TAAK-%06d", i)
+	}
+	plan, err := s.ExplainMatchingIDs(context.Background(), q, page)
+	require.NoError(t, err)
+	t.Logf("MatchingIDs plan:\n%s", plan)
+	requireNoTableScan(t, plan)
+}
+
 // requireNoTableScan fails on a plan line that scans a table. Scans of a
 // bound json_each list and of a CTE's own rows are allowed: both are bounded
 // by the query's inputs, not by the store's size.

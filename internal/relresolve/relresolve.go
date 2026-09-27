@@ -85,7 +85,11 @@ func Answer(
 	if gate == nil || match == nil {
 		return Answers{}, errors.New("relresolve: no gate or store to answer a traversal")
 	}
-	for _, spec := range specs {
+	for _, unbound := range specs {
+		spec, err := bindIdentity(ctx, unbound)
+		if err != nil {
+			return Answers{}, err
+		}
 		key := spec.Key()
 		if _, done := answers.bySpec[key]; done {
 			continue
@@ -115,14 +119,37 @@ func Answer(
 	return answers, nil
 }
 
+// bindIdentity binds a traversal's `current_user.id` constraints to the query
+// identity on ctx: the value [predicatefns.BindCurrentUser] binds for the same
+// request, so the batch answer and the per-row evaluation read one identity.
+// They key their answers by the BOUND spec, so if they ever disagreed the row
+// would find no answer and fail, rather than read another identity's answer.
+//
+// No identity is [predicatefns.ErrNoCurrentUser], never an unbound traversal.
+func bindIdentity(ctx context.Context, spec predicate.TraversalSpec) (predicate.TraversalSpec, error) {
+	if len(spec.Refs) == 0 {
+		return spec, nil
+	}
+	var identity string
+	if q, ok := predicatefns.QueryIdentityFrom(ctx); ok {
+		identity = q.ID()
+	}
+	return predicatefns.BindTraversal(spec, identity)
+}
+
 // Hop lowers a compiled traversal into the ungated hop chain a [Gate]
 // authorizes. Resolution goes through [predicatefns.ResolveTraversal], the
 // same walk load-time validation and index derivation use, so the three
 // cannot disagree about where a chain lands.
 //
-// The author's property filters constrain the FINAL hop only; intermediate
-// hops constrain type and relation.
+// The author's property and id filters constrain the FINAL hop only;
+// intermediate hops constrain type and relation. The spec must be bound (see
+// [predicatefns.BindTraversal]): a `current_user.id` constraint has no value
+// to lower until it is.
 func Hop(meta *metamodel.Metamodel, entityType string, spec predicate.TraversalSpec) (acl.TraversalHop, error) {
+	if len(spec.Refs) > 0 {
+		return acl.TraversalHop{}, errors.New("related: the traversal reads current_user and has not been bound")
+	}
 	hops, err := predicatefns.ResolveTraversal(meta, entityType, spec)
 	if err != nil {
 		return acl.TraversalHop{}, err
@@ -143,6 +170,16 @@ func Hop(meta *metamodel.Metamodel, entityType string, spec predicate.TraversalS
 			Property: name, Op: store.PropEqual, Value: str.String(), Scalar: true,
 		})
 	}
+	var endpointIDs []string
+	if spec.ID != nil {
+		id, ok := spec.ID.(predicate.String)
+		if !ok || id.String() == "" {
+			// The engine refuses both at compile and Bind refuses them when
+			// binding; an empty id would widen to "any endpoint".
+			return acl.TraversalHop{}, errors.New("related: id must be a non-empty string")
+		}
+		endpointIDs = []string{id.String()}
+	}
 
 	var next *acl.TraversalHop
 	for i := len(hops) - 1; i >= 0; i-- {
@@ -154,6 +191,7 @@ func Hop(meta *metamodel.Metamodel, entityType string, spec predicate.TraversalS
 		}
 		if i == len(hops)-1 {
 			h.Props = props
+			h.EndpointIDs = endpointIDs
 		}
 		next = h
 	}

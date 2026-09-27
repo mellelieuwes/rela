@@ -1,6 +1,7 @@
 package predicatefns
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -44,6 +45,12 @@ func compileFor(t *testing.T, src string) *predicate.Program {
 	t.Helper()
 	env := predicate.NewEnv()
 	if err := env.DeclareVar("entity", predicate.RecordType{"status": predicate.StringType}); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeclareCurrentUser(env); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.DeclareVar("other", predicate.RecordType{"id": predicate.StringType}); err != nil {
 		t.Fatal(err)
 	}
 	prog, err := predicate.Compile(env, src)
@@ -119,6 +126,51 @@ func TestValidateTraversals(t *testing.T) {
 			wantErr: "cannot be compared in a traversal",
 		},
 		{
+			name: "id literal",
+			src:  `related(entity, 'owned-by', { id = 'alice' })`,
+		},
+		{
+			name: "id from current_user",
+			src:  `related(entity, 'owned-by', { id = current_user.id })`,
+		},
+		{
+			name: "string property from current_user",
+			src:  `related(entity, 'owned-by', { name = current_user.id })`,
+		},
+		{
+			// The engine accepts any string field; this layer keeps the one
+			// every surface binds identically.
+			name:    "current_user.tool is refused",
+			src:     `related(entity, 'owned-by', { id = current_user.tool })`,
+			wantErr: "the only variable a constraint may read is current_user.id",
+		},
+		{
+			name:    "another variable is refused",
+			src:     `related(entity, 'owned-by', { id = other.id })`,
+			wantErr: "the only variable a constraint may read is current_user.id",
+		},
+		{
+			name:    "current_user.id on an undeclared property",
+			src:     `related(entity, 'owned-by', { nope = current_user.id })`,
+			wantErr: `has no property "nope"`,
+		},
+		{
+			name:    "current_user.id on a non-string-shaped property",
+			src:     `related(entity, 'caused-by', { type = 'ticket', estimate = current_user.id })`,
+			wantErr: "cannot be compared in a traversal",
+		},
+		{
+			name:    "current_user.id on a list property",
+			src:     `related(entity, 'caused-by', { type = 'ticket', tags = current_user.id })`,
+			wantErr: "is a list",
+		},
+		{
+			// A user id is never a declared value: `not related` would match all.
+			name:    "current_user.id on an enum property",
+			src:     `related(entity, 'caused-by', { type = 'ticket', status = current_user.id })`,
+			wantErr: "is an enum",
+		},
+		{
 			name:    "intermediate union hop is refused",
 			src:     `related(entity, { 'caused-by', 'owned-by' }, { type = 'person' })`,
 			wantErr: "cannot be resolved",
@@ -173,5 +225,36 @@ func TestValidateTraversals_ChainResolvesToTheFinalType(t *testing.T) {
 func TestValidateTraversals_NilInputs(t *testing.T) {
 	if err := ValidateTraversals(nil, "ticket", nil); err != nil {
 		t.Fatalf("nil inputs must be a no-op, got %v", err)
+	}
+}
+
+// BindTraversal is how every caller outside Eval binds current_user.id. A
+// missing identity must be ErrNoCurrentUser, never a spec that still lowers:
+// an unbound id constraint would reach the store as an empty endpoint set,
+// which reads as "any endpoint".
+func TestBindTraversal(t *testing.T) {
+	spec := compileFor(t, `related(entity, 'owned-by', { id = current_user.id, name = current_user.id })`).
+		Traversals()[0]
+
+	got, err := BindTraversal(spec, "alice")
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if got.ID != predicate.NewString("alice") || got.Props["name"] != predicate.NewString("alice") || len(got.Refs) != 0 {
+		t.Fatalf("bound spec = %+v", got)
+	}
+
+	if _, err := BindTraversal(spec, ""); !errors.Is(err, ErrNoCurrentUser) {
+		t.Fatalf("empty identity: err = %v, want ErrNoCurrentUser", err)
+	}
+
+	literal := compileFor(t, `related(entity, 'owned-by', { id = 'bob' })`).Traversals()[0]
+	if got, err := BindTraversal(literal, ""); err != nil || got.Key() != literal.Key() {
+		t.Fatalf("a spec with no refs must bind unchanged without an identity: %v %+v", err, got)
+	}
+
+	tool := compileFor(t, `related(entity, 'owned-by', { id = current_user.tool })`).Traversals()[0]
+	if _, err := BindTraversal(tool, "alice"); err == nil {
+		t.Fatal("current_user.tool must not bind")
 	}
 }

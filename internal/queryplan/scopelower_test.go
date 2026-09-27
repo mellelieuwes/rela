@@ -4,6 +4,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/Sourcehaven-BV/rela/internal/predicate"
 	"github.com/Sourcehaven-BV/rela/internal/predicatefns"
 	"github.com/Sourcehaven-BV/rela/internal/queryplan"
 	"github.com/Sourcehaven-BV/rela/internal/store"
@@ -20,6 +21,7 @@ func TestLowerScope(t *testing.T) {
 		wantOK    bool
 		wantProps []store.PropPredicate
 		wantTrav  int
+		wantID    string
 	}{
 		{
 			name:   "equalities and a traversal lower together",
@@ -42,6 +44,21 @@ func TestLowerScope(t *testing.T) {
 		{name: "current_user.tool declines", src: "entity.assignee == current_user.tool", identity: identity},
 		{name: "or declines", src: "entity.status == 'a' or related(entity, 'implements')"},
 		{name: "not related declines", src: "not related(entity, 'implements')"},
+		{
+			name:   "a current_user traversal lowers bound to the identity",
+			src:    "entity.status == 'open' and related(entity, 'ownedBy', { id = current_user.id })",
+			wantOK: true, identity: identity, wantTrav: 1, wantID: identity,
+			wantProps: []store.PropPredicate{{Property: "status", Op: store.PropEqual, Value: "open", Scalar: true}},
+		},
+		{
+			name:   "a literal id lowers",
+			src:    "related(entity, 'ownedBy', { id = 'PERS-X' })",
+			wantOK: true, wantTrav: 1, wantID: "PERS-X",
+		},
+		// Declining is the fail-closed direction: the Go path then reports
+		// ErrNoCurrentUser. Lowering would need an id, and an empty one
+		// reaches the store as "any endpoint".
+		{name: "no identity declines a current_user traversal", src: "related(entity, 'ownedBy', { id = current_user.id })"},
 	}
 	ev := predicatefns.NewEvaluator(meta)
 	for _, tc := range tests {
@@ -62,6 +79,14 @@ func TestLowerScope(t *testing.T) {
 			}
 			if len(got.Traversals) != tc.wantTrav {
 				t.Errorf("traversals = %d, want %d", len(got.Traversals), tc.wantTrav)
+			}
+			for _, spec := range got.Traversals {
+				if len(spec.Refs) != 0 {
+					t.Errorf("a lowered traversal is still unbound: %+v", spec)
+				}
+				if tc.wantID != "" && spec.ID != predicate.NewString(tc.wantID) {
+					t.Errorf("id = %#v, want %q", spec.ID, tc.wantID)
+				}
 			}
 		})
 	}

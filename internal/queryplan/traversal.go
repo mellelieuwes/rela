@@ -86,11 +86,17 @@ func traversalIndexTarget(
 		return "", nil
 	}
 
+	// PropNames leaves out an `id` constraint, which is answered by the
+	// relation's own endpoint column and needs no property index. A property
+	// compared against current_user.id is indexed like a literal one: the
+	// value differs per request, the column does not.
 	for _, name := range spec.PropNames() {
 		if !stringComparableOnEveryType(meta, []string{current}, name) {
 			continue
 		}
-		if _, ok := spec.Props[name].(predicate.String); !ok {
+		_, isLiteral := spec.Props[name].(predicate.String)
+		_, isRef := spec.Refs[name]
+		if !isLiteral && !isRef {
 			continue
 		}
 		props = append(props, name)

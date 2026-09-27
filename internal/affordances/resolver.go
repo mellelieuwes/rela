@@ -387,6 +387,9 @@ func (r *PolicyResolver) compile(roleName, entityType, block string, idx int, wh
 	prog, err := predicate.Compile(env, when)
 	if err == nil && len(prog.Traversals()) > 0 {
 		err = predicatefns.ValidateTraversals(r.meta, entityType, prog)
+		if err == nil {
+			err = refuseIdentityTraversal(prog)
+		}
 		if err == nil && r.traversals == nil {
 			err = fmt.Errorf("%s(...) is not available: no store is wired to answer it", predicate.FuncRelated)
 		}
