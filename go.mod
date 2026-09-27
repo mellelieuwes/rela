@@ -32,7 +32,7 @@ require (
 	github.com/teambition/rrule-go v1.8.2
 	github.com/teekennedy/goldmark-markdown v0.5.1
 	github.com/vloothuis/textanchor v0.2.0
-	github.com/wailsapp/wails/v3 v3.0.0-beta.23
+	github.com/wailsapp/wails/v3 v3.0.0-beta.25
 	github.com/wneessen/go-mail v0.8.1
 	github.com/yuin/goldmark v1.8.6
 	github.com/yuin/gopher-lua v1.1.2
