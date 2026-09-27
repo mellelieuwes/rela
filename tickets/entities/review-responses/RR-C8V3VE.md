@@ -1,0 +1,9 @@
+---
+id: RR-C8V3VE
+type: review-response
+title: 'Design review: rela-server''s ownership guard does not see twins linked by the CLI'
+finding: 'Integration happens across processes. The agent runs `rela twin link/pull` as separate CLI processes while rela-server serves the SPA and API against the same `.rela/twins`. The design gives filetwins no cross-process story. ''Implementations serialise writes'' (design:164) is in-process only. OwnedFields runs on every write and every affordance row, so an implementer will want an in-memory by-target index, and that index goes stale as soon as the CLI links a twin. The server would then accept theirs writes (acceptance criterion 5 fails through the data-entry API, the main surface). Concurrent CLI Pull and server-side EntityRenamed/EntityDeleted can also lose each other''s file writes. Separately, buildTwins decides nil vs service once at boot (design:280-283): a server started before pacts were added keeps NoTwinOwnership until restart, while the CLI already links twins. Fix: specify how the file backend is read. Either use no cache and a per-target index file (`.rela/twins/_targets/<entity-id>`) read per lookup, or validate the cache against directory mtime or the fsstore watcher. Take a file lock (flock) around read-modify-write. Add to the twinstest kit a two-Store-instances-on-one-directory case (link in A, OwnedFields in B). Add an acceptance criterion: while rela-server runs, `rela twin link` makes a theirs PATCH fail without a restart.'
+severity: critical
+resolution: filetwins keeps no cache (every read hits disk), maintains a per-entity `_targets` index and takes an flock around every read-modify-write; the service applies its bookkeeping through Store.Modify under that lock and rechecks target and liveness there. twinstest gains cross-instance cases (create in A visible in B; concurrent creates; retarget in A not reverted by a stale write in B).
+status: addressed
+---

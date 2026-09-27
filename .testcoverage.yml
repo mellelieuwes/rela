@@ -100,6 +100,7 @@ exclude:
     - ^internal/schedulerstate/schedulerstatetest # shared conformance test kit (exercised via scheduler-state backends)
     - ^internal/userstate/userstatetest # shared conformance test kit (exercised via mem/kv/pgstore backends)
     - ^internal/comments/commentstest # shared conformance test kit (exercised via the file + memory backends)
+    - ^internal/twins/twinstest # shared conformance test kit (exercised via the file + memory backends)
     - ^internal/datamigration/migstatetest # shared conformance test kit (exercised via the file/memory/sqlite/pg backends)
     - ^internal/appbuild/backendtest # build-tagged test backend supplier; the postgres half only compiles under -tags postgres
     - ^internal/store/pgstore  # covered by the dedicated postgres CI job (needs a live DB; skipped without RELA_TEST_DATABASE_URL)

@@ -290,6 +290,7 @@ func newOriginManager(t *testing.T) (*originRecordingStore, *entitymanager.Manag
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		CopyGuard:   allowGuard{allow: true},
 	})
 	if err != nil {

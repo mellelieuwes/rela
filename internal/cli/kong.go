@@ -51,7 +51,7 @@ var (
 
 // CLI is the kong-parsed root.
 //
-// 47 exported fields (4 global flags + 43 subcommands) — a documented
+// 49 exported fields (4 global flags + 45 subcommands) — a documented
 // structural exception to the 20-field load line, not a ratchet target
 // (TKT-NS3XPE). The count is dictated by kong's one-field-per-subcommand
 // binding convention: the subcommand fields are dispatched by kong and read
@@ -71,7 +71,10 @@ var (
 // tooling (`dev seed` today), so later developer commands nest under it
 // rather than adding fields here.
 //
-//plimsoll:max-fields=48
+// Raised 48 → 49 for `twin` (TKT-AGVQLY), a sub-struct holding the nine twin
+// verbs, so they add one field rather than nine.
+//
+//plimsoll:max-fields=49
 type CLI struct {
 	// Global flags.
 	Project string `help:"Project directory (default: auto-detect from cwd)." env:"RELA_PROJECT"`
@@ -143,6 +146,7 @@ type CLI struct {
 	Renumber             RenumberCmd             `cmd:"" help:"Renumber managed order properties on orderable relations."`
 	Sync                 SyncCmd                 `cmd:"" help:"Sync local changes with a remote rela-server."`
 	Secrets              SecretsCmd              `cmd:"" help:"Inspect how project secrets are supplied."`
+	Twin                 TwinCmd                 `cmd:"" help:"Link entities to external systems and sync them (twins)."`
 }
 
 // VersionCmd needs no services.
@@ -269,7 +273,7 @@ func requiresProject(cmd string) bool {
 		"template", "create", "update", "delete", "link", "unlink",
 		"detach", "import", "normalize", "script", "scheduler",
 		"rename", "analyze", "acl", "attach", "attachments", "gc", "renumber",
-		"sync", "history", "restore", "secrets",
+		"sync", "twin", "history", "restore", "secrets",
 		"relation-history", "relation-restore", "history-purge", "relation-history-purge",
 		"dev":
 		return true

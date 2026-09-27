@@ -67,6 +67,8 @@ type attachFixture struct {
 type attachOpts struct {
 	policy *acl.Policy
 	limit  int64
+	// twins overrides the attachment ownership guard; nil uses the build's.
+	twins attachment.TwinOwnership
 }
 
 func newAttachFixture(t *testing.T, opts attachOpts) attachFixture {
@@ -98,7 +100,12 @@ func newAttachFixture(t *testing.T, opts attachOpts) attachFixture {
 	if limit == 0 {
 		limit = store.MaxAttachmentBytes
 	}
-	snap, err := NewAttachmentSnapshot(svc.Store(), svc.EntityManager(), lock.NewMemoryLocker(), svc.ACL(), meta, nil, limit)
+	var twins attachment.TwinOwnership = appbuild.TwinOwnership(svc)
+	if opts.twins != nil {
+		twins = opts.twins
+	}
+	snap, err := NewAttachmentSnapshot(svc.Store(), svc.EntityManager(), lock.NewMemoryLocker(), svc.ACL(),
+		twins, meta, nil, limit)
 	if err != nil {
 		t.Fatalf("NewAttachmentSnapshot: %v", err)
 	}
@@ -457,6 +464,40 @@ func TestAttachments_LockedEntityRefusesWrites(t *testing.T) {
 	mustFail(t, f.attach(ctx, t, lockedID, "file", "a.txt", []byte("a")), "inaccessible")
 	mustFail(t, f.call(ctx, t, "delete_attachment",
 		map[string]any{"id": lockedID, "property": "file", "file_name": "a.txt"}), "inaccessible")
+}
+
+// ownsFile owns every entity's `file` property for basecamp.
+type ownsFile struct{}
+
+func (ownsFile) OwnedFields(context.Context, string, string) (map[string][]string, error) {
+	return map[string][]string{"file": {"basecamp"}}, nil
+}
+
+// TestAttachments_OwnedPropertyRefusesWrites: attach_file and
+// delete_attachment on a file property an external system owns answer the
+// ownership sentence and leave the stored bytes alone.
+func TestAttachments_OwnedPropertyRefusesWrites(t *testing.T) {
+	t.Parallel()
+	f := newAttachFixture(t, attachOpts{twins: ownsFile{}})
+	ctx := context.Background()
+	if err := f.svc.Store().AttachFile(ctx, docID, "file", "a.txt", strings.NewReader("original")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	mustFail(t, f.attach(ctx, t, docID, "file", "a.txt", []byte("clobbered")), "owned by basecamp")
+	mustFail(t, f.call(ctx, t, "delete_attachment",
+		map[string]any{"id": docID, "property": "file", "file_name": "a.txt"}), "owned by basecamp")
+
+	rc, err := f.svc.Store().ReadAttachment(ctx, docID, "file", "a.txt")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	defer rc.Close()
+	if got, _ := io.ReadAll(rc); string(got) != "original" {
+		t.Fatalf("bytes = %q, want original", got)
+	}
+	// An unowned property of the same entity still takes uploads.
+	mustSucceed(t, f.attach(ctx, t, docID, "files", "b.txt", []byte("b")))
 }
 
 func TestAttachments_ConcurrentAttachRespectsMax(t *testing.T) {

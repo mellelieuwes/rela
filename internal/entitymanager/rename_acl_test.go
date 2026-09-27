@@ -60,6 +60,7 @@ func TestRename_FailsClosedOnNonNotFoundFetchError(t *testing.T) {
 		ACL:         acl.ReadOnlyACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}
 	mgr, err := entitymanager.New(deps)
 	if err != nil {
@@ -109,6 +110,7 @@ func TestDelete_FailsClosedOnNonNotFoundFetchError(t *testing.T) {
 		ACL:         acl.ReadOnlyACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}
 	mgr, err := entitymanager.New(deps)
 	if err != nil {

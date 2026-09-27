@@ -23,6 +23,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/store"
 	"github.com/Sourcehaven-BV/rela/internal/templating"
 	"github.com/Sourcehaven-BV/rela/internal/tracer"
+	"github.com/Sourcehaven-BV/rela/internal/twins"
 	"github.com/Sourcehaven-BV/rela/internal/validator"
 )
 
@@ -84,6 +85,9 @@ type writeServices struct {
 	// MigState is the per-store migration record. Distinct from State: that
 	// is node-local cache, this describes what the CONTENT conforms to.
 	MigState datamigration.StateStore
+	// Twins is the twin service `rela twin` drives (appbuild.Twins).
+	// Nil: accepted — the schema declares no pact; every twin command says so.
+	Twins *twins.Service
 }
 
 // entityWriter is the write surface the CLI's mutating subcommands call. See
@@ -138,6 +142,7 @@ func newCLIBundles(svc *appbuild.Services) (*cliBundles, error) {
 		EntityManager: svc.EntityManager(),
 		Locker:        lock.For(svc.Store()),
 		Authorizer:    attachment.AllowAllWrites{}, // operator shell: no ACL
+		Twins:         appbuild.TwinOwnership(svc),
 		// Native MIME allowlist on the CLI attach path too (runner nil →
 		// no external scan/transform until the cmd: harness is wired).
 		Processor: attachment.NewPolicyProcessor(svc.Meta(), nil),
@@ -189,6 +194,7 @@ func newCLIBundles(svc *appbuild.Services) (*cliBundles, error) {
 		LuaWriteDeps:  svc.LuaWriteDeps(),
 		State:         svc.State(),
 		MigState:      svc.MigState(),
+		Twins:         appbuild.Twins(svc),
 	}
 	return &cliBundles{
 		read:       &read,

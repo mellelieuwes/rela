@@ -383,6 +383,7 @@ Each entity type defines:
 | `color`            | Fill color for graph visualizations (hex or named)                              |
 | `border_color`     | Border color for graph visualizations                                           |
 | `display_property` | Property whose value names the entity. See [Display name](#display-name) below. |
+| `pacts`            | Fields owned by external systems. See [Pacts](#pacts-fields-owned-by-external-systems) below. |
 
 ### Display name
 
@@ -895,6 +896,70 @@ properties:
     values: [frontend, backend, api, database, security]
     list: true # Allows selecting multiple values
 ```
+
+### Pacts: fields owned by external systems
+
+A `pacts:` block declares that entities of this type have a counterpart, a
+**twin**, in an external system, and which side owns which field. rela never
+calls the external system; an agent does, and reports to rela through
+`rela twin`. See the [Twins guide](twins.md) for the sync loop, states and
+findings.
+
+```yaml
+entities:
+  scenario:
+    properties:
+      title: {type: string, required: true}
+      status: {type: enum, values: [open, done]}
+    pacts:
+      basecamp:                       # the system id
+        scope: https://app.basecamp.com/5734045/buckets/35926565/todolists/10075319677
+        theirs: ["*"]                 # fields the external system owns
+        shared: []                    # fields both sides edit
+        propose: []                   # ours fields whose external edits are proposals
+        instructions: |               # optional: the agent's brief, in markdown
+          A Scenario is one todo in the scope todolist. ...
+```
+
+| Key | Description |
+| --- | --- |
+| system id (map key) | Names the external system. `^[a-z][a-z0-9_-]{0,31}$` |
+| `scope` | Required. Absolute http(s) URL of the external container |
+| `theirs` | Fields the external system owns; `["*"]` alone means every field except computed properties |
+| `shared` | Fields both sides edit; different edits on both sides become a conflict |
+| `propose` | Ours fields where an external edit is reported as a proposal rather than reverted |
+| `instructions` | Markdown describing how the two sides map; printed by `rela twin pact` |
+
+A field is a declared property name or `body` (the markdown content). Every
+field not in `theirs` or `shared` is **ours**. Relations are not fields. A
+computed property is always ours.
+
+Once an entity has a live twin, a change to one of its `theirs` fields is
+refused on every ordinary write path, including elevated ones, copies into the
+entity, attachment uploads and deletes, and git conflict resolution in the web
+app, with a message such as
+`field status of SC-015 is owned by basecamp (Twin); change it there`.
+`rela twin pull` is the write path meant for them. Automation `set` actions,
+cascades, the replication path, `rela import`, `rela normalize`,
+`rela migrate data` and files edited outside rela are not checked; the next
+pull reports such a change as `local_drift` and restores the external value.
+The [Twins guide](twins.md#where-ownership-is-enforced) lists exactly what is
+and is not checked.
+
+The loader refuses the whole schema when a pact:
+
+- contains an unknown key;
+- has an invalid system id, or a missing or non-http(s) `scope`;
+- names a field that is neither a property of the type nor `body`, or names a
+  computed property;
+- uses `"*"` outside `theirs`, or together with named fields;
+- declares `shared` fields next to `theirs: ["*"]`;
+- places a field in both `theirs` and `shared`, or twice in one list;
+- lists in `propose` anything but an ours field.
+
+A type that has a property named `body`, or that declares `faces:`, cannot
+declare pacts. Pacts need the filesystem, in-memory or desktop build: a
+PostgreSQL or SQLite build with pacts declared refuses to start.
 
 ## Relations
 

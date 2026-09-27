@@ -13,6 +13,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/acl"
 	v1 "github.com/Sourcehaven-BV/rela/internal/apiwire/v1"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
+	"github.com/Sourcehaven-BV/rela/internal/canonical"
 	"github.com/Sourcehaven-BV/rela/internal/conflict"
 	entityPkg "github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
@@ -652,6 +653,9 @@ func writePatchError(w http.ResponseWriter, r *http.Request, err error) {
 			"Entity has been modified", "concurrent write detected")
 		return
 	}
+	if writeExternallyOwnedIf(w, err) {
+		return
+	}
 	writeV1Error(w, r, http.StatusUnprocessableEntity, "validation_failed", "Validation failed", err.Error())
 }
 
@@ -734,8 +738,8 @@ func (h *writeHandler) handleV1UpdateEntity(w http.ResponseWriter, r *http.Reque
 	// what the resolver would have surfaced on GET. Runs before any
 	// other validation so the failure mode is identical regardless of
 	// what else the PATCH body would have triggered.
-	if denial := h.affordances.validateFieldWrite(
-		r.Context(), entity, req.Properties, req.PropertiesUnset,
+	if denial := h.affordances.validateEntityWrite(
+		r.Context(), entity, req.Properties, req.PropertiesUnset, req.Content,
 	); denial != nil {
 		h.denyAfford(r.Context(), w, entity, *denial)
 		return
@@ -1333,6 +1337,9 @@ func (h *writeHandler) handleV1ConflictResolve(w http.ResponseWriter, r *http.Re
 	if !h.authorizeConflictResolve(r.Context(), w, resolvedEntity, resolvedRelation) {
 		return
 	}
+	if resolvedEntity != nil && !h.validateConflictFieldWrites(r.Context(), w, cf, resolvedEntity) {
+		return
+	}
 	if err := conflict.ValidateResolved(resolvedEntity, st.Meta); err != nil {
 		writeV1Error(w, r, http.StatusInternalServerError, "resolve_failed", "Failed to resolve", err.Error())
 		return
@@ -1385,6 +1392,45 @@ func (h *writeHandler) authorizeConflictResolve(
 			decision.Reason, decision.RuleKind, decision.RuleID),
 	})
 	writeForbiddenIfACLDenied(w, &acl.ForbiddenError{Decision: decision})
+	return false
+}
+
+// validateConflictFieldWrites runs the field-level write checks a PATCH gets
+// (validateEntityWrite: hidden, externally owned, read-only, enum options,
+// owned body) over the fields the resolution CHANGES. Like the ACL gate
+// above, it lives here because the resolve bypasses entitymanager — and with
+// it the manager's twin-ownership guard, so without this check a caller could
+// pick the stale side, or type a new body, for a field an external system
+// owns.
+//
+// The base is the stored row: what rela holds for the entity. When the store
+// has no row for it (the conflicted file never parsed), the "ours" side — the
+// local checkout before the merge — stands in. Checking only changed fields
+// keeps the strict read-only rule from refusing an untouched field.
+func (h *writeHandler) validateConflictFieldWrites(
+	ctx context.Context, w http.ResponseWriter, cf *conflict.ConflictedFile, resolved *entityPkg.Entity,
+) bool {
+	base, found := h.reader.getEntityRef(ctx, entityRef{ID: resolved.ID, Face: resolved.Face})
+	if !found {
+		base = cf.Ours.Entity
+	}
+	set := map[string]any{}
+	for name, v := range resolved.Properties {
+		if !canonical.EqualValue(base.Properties[name], v) {
+			set[name] = v
+		}
+	}
+	var unset []string
+	for name, v := range base.Properties {
+		if _, kept := resolved.Properties[name]; !kept && !canonical.EqualValue(v, nil) {
+			unset = append(unset, name)
+		}
+	}
+	denial := h.affordances.validateEntityWrite(ctx, base, set, unset, &resolved.Content)
+	if denial == nil {
+		return true
+	}
+	h.denyAfford(ctx, w, base, *denial)
 	return false
 }
 

@@ -154,6 +154,9 @@ type copyInvokeRequest struct {
 //     disallowed target id, target of another type) and a validation
 //     failure -> 422, the ordinary "coherent request this surface cannot
 //     satisfy", with the kernel's own text (it names config and caller ids).
+//   - [entitymanager.TheirsWriteError] (the copy would change a field an
+//     external system owns on an existing twinned target) -> 422
+//     externally_owned, the same answer every other entity write gives.
 //   - everything else -> 500 with a generic detail; the real error is logged,
 //     because a wrapped store error in the body leaks backend internals.
 func (h *copiesHandler) invoke(w http.ResponseWriter, r *http.Request, name string) {
@@ -231,6 +234,9 @@ func writeCopyError(w http.ResponseWriter, r *http.Request, err error) {
 				"Copy could not be applied", err.Error())
 			return
 		}
+	}
+	if writeExternallyOwnedIf(w, err) {
+		return
 	}
 	var verr *entitymanager.ValidationError
 	if errors.As(err, &verr) {

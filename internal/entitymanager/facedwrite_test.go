@@ -42,6 +42,7 @@ func facedWriteManager(t *testing.T, gate acl.ACL) (*entitymanager.Manager, *mem
 		Store: st, Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{},
 		ACL: gate, Transitions: statemachine.EmptySet(),
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -174,6 +175,7 @@ entities:
 		Store: memstore.New(), Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{},
 		ACL: acl.NopACL{}, Transitions: statemachine.EmptySet(),
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -334,6 +336,7 @@ entities:
 		Store: memstore.New(), Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{},
 		ACL: acl.NopACL{}, Transitions: statemachine.EmptySet(),
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)

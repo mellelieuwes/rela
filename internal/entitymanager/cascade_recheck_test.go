@@ -82,6 +82,7 @@ func newRecheckManager(t *testing.T, autos []automation.Automation) (*entitymana
 		Cascade:     runner,
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -291,6 +292,7 @@ func TestCascadeWrite_TransitionRecheckedAfterAutomation(t *testing.T) {
 		Automations: engine, Cascade: runner,
 		Transitions: machines,
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -357,6 +359,7 @@ relations: {}`, 1)
 		Store: st, Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{},
 		ACL: acl.NopACL{}, Automations: engine, Cascade: runner,
 		Transitions: statemachine.EmptySet(), FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins: entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatal(err)

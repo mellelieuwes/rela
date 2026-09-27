@@ -43,6 +43,31 @@ func TestPatchEntity_ExpectedVersionAppliesWhenUnchanged(t *testing.T) {
 	assert.Equal(t, "Login v2", got.GetString("title"))
 }
 
+// TestPatchEntity_ResultVersionIsTheStoredVersion pins that UpdateResult.Version
+// is the token of the row the write left behind, so a caller can chain a
+// compare-and-swap off it without re-reading — and that the chained CAS lands.
+func TestPatchEntity_ResultVersionIsTheStoredVersion(t *testing.T) {
+	st := memstore.New()
+	mgr := newManagerOverStore(t, st)
+	stored, before := seedCASEntity(t, st)
+
+	res, err := mgr.PatchEntity(context.Background(), stored.ID, entity.Patch{
+		Properties: map[string]any{"title": "Login v2"},
+	})
+	require.NoError(t, err)
+
+	got, err := st.GetEntity(context.Background(), stored.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(store.VersionOf(got)), res.Version)
+	assert.NotEqual(t, string(before), res.Version, "the version must move with the write")
+
+	_, err = mgr.PatchEntity(context.Background(), stored.ID, entity.Patch{
+		Properties:      map[string]any{"title": "Login v3"},
+		ExpectedVersion: res.Version,
+	})
+	require.NoError(t, err, "a CAS on the returned version must apply")
+}
+
 // TestPatchEntity_StaleExpectedVersionSurvivesAsTypedConflict is the
 // RR-HI9QIU guard, and the reason this test exists as its own file.
 //

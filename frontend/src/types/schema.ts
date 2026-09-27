@@ -78,6 +78,26 @@ export interface EntityType {
   // UI that shows the box to someone without `comment:add` gets a 403, not a
   // write.
   commentable?: boolean
+  // The external systems this type is twinned with and which fields each
+  // owns, sorted by system. Absent when the type declares no pacts. Mirrors
+  // v1.EntityType.Pacts.
+  pacts?: PactInfo[]
+}
+
+// PactInfo mirrors v1.Pact — one type's contract with an external system.
+// The agent brief (instructions) is not served.
+export interface PactInfo {
+  system: string
+  // http(s) URL of the external container the twins live in.
+  scope: string
+  // Fields the external system owns; ['*'] means every field except computed
+  // properties. `body` is the markdown content. Every field not in theirs or
+  // shared, and every computed property, is rela's.
+  theirs: string[]
+  // Fields both sides edit.
+  shared: string[]
+  // Rela-owned fields whose external edits are proposed, not reverted.
+  propose: string[]
 }
 
 // FaceInfo mirrors v1.FaceDef — one declared content state of a type.

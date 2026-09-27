@@ -538,6 +538,16 @@ func (ce *copyEngine) buildCopyTarget(
 		}
 	}
 
+	// An existing target is an update, and an update may not change a field
+	// an external system owns through a twin — the same rule
+	// UpdateEntity/PatchEntity enforce, checked before anything is written.
+	// A fresh target has no twin to own anything.
+	if plan.existing != nil && !ce.m.twinSync {
+		if err := rejectTheirsChanges(ctx, ce.m.deps, plan.existing, target); err != nil {
+			return err
+		}
+	}
+
 	hard, _ := partitionValidationErrors(
 		ce.m.deps.Meta.ValidateEntity(target.ID, target.Type, target.Properties))
 	if len(hard) > 0 {

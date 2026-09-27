@@ -161,6 +161,7 @@ func newCopyAuthzManagerFull(
 		Audit: audit.Nop{}, ACL: a,
 		Transitions:  statemachine.EmptySet(),
 		FieldGate:    entitymanager.AllowAllFieldGate{},
+		Twins:        entitymanager.NoTwinOwnership{},
 		CopyGuard:    guard,
 		CopyReadGate: gate,
 	})

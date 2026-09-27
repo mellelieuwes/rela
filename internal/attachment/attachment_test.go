@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -61,6 +62,14 @@ type attachmentFixture struct {
 // live; mirrors the production wiring path.
 func setupAttachmentService(t *testing.T) attachmentFixture {
 	t.Helper()
+	return setupAttachmentServiceWith(t, entitymanager.NoTwinOwnership{})
+}
+
+// setupAttachmentServiceWith is setupAttachmentService with twins as both the
+// manager's and the attachment service's ownership guard, as production wires
+// them.
+func setupAttachmentServiceWith(t *testing.T, twins attachment.TwinOwnership) attachmentFixture {
+	t.Helper()
 	root := t.TempDir()
 	for _, d := range []string{
 		filepath.Join(root, ".rela"),
@@ -100,6 +109,7 @@ func setupAttachmentService(t *testing.T) attachmentFixture {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       twins,
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -110,6 +120,7 @@ func setupAttachmentService(t *testing.T) attachmentFixture {
 		EntityManager: mgr,
 		Locker:        lock.NewMemoryLocker(),
 		Authorizer:    attachment.AllowAllWrites{},
+		Twins:         twins,
 	})
 	if err != nil {
 		t.Fatalf("attachment.New: %v", err)
@@ -228,6 +239,10 @@ func TestService_New_RejectsNilDeps(t *testing.T) {
 			Store: storeStub{}, Meta: &metamodel.Metamodel{}, EntityManager: &countingPatcher{},
 			Locker: lock.NewMemoryLocker(),
 		}, "Authorizer is required"},
+		{"nil twins", attachment.Deps{
+			Store: storeStub{}, Meta: &metamodel.Metamodel{}, EntityManager: &countingPatcher{},
+			Locker: lock.NewMemoryLocker(), Authorizer: attachment.AllowAllWrites{},
+		}, "Twins is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -426,7 +441,7 @@ func TestService_DeleteAbsentFileDoesNotWrite(t *testing.T) {
 	counter := &countingPatcher{EntityPatcher: f.mgr}
 	svc, err := attachment.New(attachment.Deps{
 		Store: f.st, Meta: f.meta, EntityManager: counter, Locker: lock.NewMemoryLocker(),
-		Authorizer: attachment.AllowAllWrites{},
+		Authorizer: attachment.AllowAllWrites{}, Twins: entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("attachment.New: %v", err)
@@ -451,4 +466,112 @@ func TestService_DeleteAbsentFileDoesNotWrite(t *testing.T) {
 	if counter.n != 1 {
 		t.Fatalf("PatchEntity called %d times for a stale value, want 1", counter.n)
 	}
+}
+
+// ownedTwins owns the given fields of every entity for basecamp.
+type ownedTwins []string
+
+func (o ownedTwins) OwnedFields(context.Context, string, string) (map[string][]string, error) {
+	owned := map[string][]string{}
+	for _, f := range o {
+		owned[f] = []string{"basecamp"}
+	}
+	return owned, nil
+}
+
+// TestService_OwnedFilePropertyIsRefusedBeforeBytesChange pins that an upload
+// or delete on a file property an external system owns is refused before any
+// attachment byte changes. The manager's guard alone only sees the stamp,
+// which runs after the bytes were written (and old files deleted), and a
+// same-name upload does not change the stamp at all.
+func TestService_OwnedFilePropertyIsRefusedBeforeBytesChange(t *testing.T) {
+	spec := metamodel.PropertyDef{Type: metamodel.PropertyTypeFile}
+	cases := []struct {
+		name  string
+		owned ownedTwins
+		op    func(ctx context.Context, svc *attachment.Service, e *entity.Entity) error
+	}{
+		{"upload new name", ownedTwins{"spec"}, func(ctx context.Context, svc *attachment.Service, e *entity.Entity) error {
+			_, err := svc.WriteAttachment(ctx, e, spec, "spec", "new.pdf", strings.NewReader("new"))
+			return err
+		}},
+		{"upload same name", ownedTwins{"spec"}, func(ctx context.Context, svc *attachment.Service, e *entity.Entity) error {
+			_, err := svc.WriteAttachment(ctx, e, spec, "spec", "old.pdf", strings.NewReader("new"))
+			return err
+		}},
+		{"delete", ownedTwins{"spec"}, func(ctx context.Context, svc *attachment.Service, e *entity.Entity) error {
+			return svc.DeleteAttachment(ctx, e, spec, "spec", "old.pdf")
+		}},
+		{"detach under *", ownedTwins{metamodel.PactAllFields}, func(ctx context.Context, svc *attachment.Service, e *entity.Entity) error {
+			_, err := svc.DetachFile(ctx, e, spec, "spec", "")
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupAttachmentServiceWith(t, tc.owned)
+			ctx := context.Background()
+			e := seedOwnedSpec(ctx, t, f)
+
+			err := tc.op(ctx, f.svc, e)
+			var owned *entitymanager.TheirsWriteError
+			if !errors.As(err, &owned) {
+				t.Fatalf("err = %v, want *entitymanager.TheirsWriteError", err)
+			}
+			if !slices.Equal(owned.Fields, []string{"spec"}) || !slices.Equal(owned.Systems, []string{"basecamp"}) {
+				t.Errorf("refusal names fields %v systems %v, want [spec] [basecamp]", owned.Fields, owned.Systems)
+			}
+
+			infos, err := f.svc.List(ctx, "T-1")
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(infos) != 1 || infos[0].FileName != "old.pdf" {
+				t.Errorf("attachments = %+v, want only old.pdf", infos)
+			}
+			rc, err := f.st.ReadAttachment(ctx, "T-1", "spec", "old.pdf")
+			if err != nil {
+				t.Fatalf("read old.pdf: %v", err)
+			}
+			data, _ := io.ReadAll(rc)
+			rc.Close()
+			if string(data) != "old" {
+				t.Errorf("old.pdf bytes = %q, want %q", data, "old")
+			}
+			got, err := f.st.GetEntity(ctx, "T-1")
+			if err != nil {
+				t.Fatalf("get entity: %v", err)
+			}
+			if got.GetString("spec") != "attachments/T-1/spec/old.pdf" {
+				t.Errorf("spec = %q, want it unchanged", got.GetString("spec"))
+			}
+		})
+	}
+}
+
+// TestService_UnownedFilePropertyStillWrites: owning another field of the
+// entity does not lock its attachments.
+func TestService_UnownedFilePropertyStillWrites(t *testing.T) {
+	f := setupAttachmentServiceWith(t, ownedTwins{"title"})
+	ctx := context.Background()
+	e := seedOwnedSpec(ctx, t, f)
+	spec := metamodel.PropertyDef{Type: metamodel.PropertyTypeFile}
+	if _, err := f.svc.WriteAttachment(ctx, e, spec, "spec", "new.pdf", strings.NewReader("new")); err != nil {
+		t.Fatalf("upload to an unowned file property: %v", err)
+	}
+}
+
+// seedOwnedSpec stores T-1 with old.pdf on spec, straight through the store
+// (the guarded manager would refuse the stamp).
+func seedOwnedSpec(ctx context.Context, t *testing.T, f attachmentFixture) *entity.Entity {
+	t.Helper()
+	e := entity.New("T-1", "ticket")
+	e.Properties["spec"] = "attachments/T-1/spec/old.pdf"
+	if err := f.st.CreateEntity(ctx, e); err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	if err := f.st.AttachFile(ctx, "T-1", "spec", "old.pdf", strings.NewReader("old")); err != nil {
+		t.Fatalf("seed attachment: %v", err)
+	}
+	return e
 }

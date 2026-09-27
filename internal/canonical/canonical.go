@@ -48,6 +48,7 @@ import (
 	"fmt"
 	"hash"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"time"
@@ -96,6 +97,24 @@ func HashRelation(r entity.Relation) string {
 	w.properties(r.Properties)
 	w.body(r.Content)
 	return w.sum()
+}
+
+// EqualValue reports whether two property values are the same logical value:
+// equal once both are folded by the normalization [HashEntity] applies, so a
+// comparison agrees with the hash instead of with whichever Go types a
+// backend's decoder produced (int vs a whole float64, []string vs []any, a
+// time.Time vs its RFC3339 string). Callers pass nil for an absent property;
+// nil equals only nil, while "" and an empty list are values. NaN never equals
+// itself.
+func EqualValue(a, b any) bool {
+	return reflect.DeepEqual(normalize(a), normalize(b))
+}
+
+// EqualBody reports whether two markdown bodies are the same once both are
+// normalized the way [HashEntity] normalizes a body, so fsstore's reflowed
+// body equals the raw text it was written from.
+func EqualBody(a, b string) bool {
+	return a == b || markdown.FormatMarkdown(a) == markdown.FormatMarkdown(b)
 }
 
 // writer streams a length-prefixed encoding of a record into a SHA-256 hash.

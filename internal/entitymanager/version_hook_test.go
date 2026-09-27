@@ -35,6 +35,7 @@ func newVersionManager(t *testing.T) (*entitymanager.Manager, *fakeRecorder) {
 		ACL:             acl.NopACL{},
 		Transitions:     statemachine.EmptySet(),
 		FieldGate:       entitymanager.AllowAllFieldGate{},
+		Twins:           entitymanager.NoTwinOwnership{},
 		VersionRecorder: rec,
 	})
 	if err != nil {

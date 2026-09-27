@@ -57,6 +57,7 @@ func putAttachmentAs(ctx context.Context, t *testing.T, app *App, d *acl.Declara
 	return rec
 }
 
+//nolint:unparam // entityID is conceptually variable; tests use one fixture.
 func deleteAttachmentAs(ctx context.Context, t *testing.T, app *App, d *acl.Declarative,
 	entityID, property, fileName string,
 ) *httptest.ResponseRecorder {
@@ -652,5 +653,48 @@ func TestAttachmentUpload_FullUploadBudgetIs503(t *testing.T) {
 	}
 	if got := mustGet(t, app, "TKT-001").GetString("screenshot"); got != "" {
 		t.Errorf("property = %q after a refused upload, want empty", got)
+	}
+}
+
+// TestAttachmentWrite_OwnedPropertyIs422BeforeBytes: an upload (new or same
+// name) or delete on a file property an external system owns through a twin
+// answers 422 externally_owned, and the attachment list, the bytes and the
+// stamped property are all left as they were.
+func TestAttachmentWrite_OwnedPropertyIs422BeforeBytes(t *testing.T) {
+	app, _ := twinsApp(t, "screenshot")
+	d := writeACL(t, app)
+	app.acl = d
+	ctx := context.Background()
+	const stamped = "attachments/" + twinTicket + "/screenshot/a.txt"
+	seedAttachment(t, app, twinTicket, "a.txt", []byte("original"))
+	e := mustGet(t, app, twinTicket)
+	e.Properties["screenshot"] = stamped
+	if err := app.store.UpdateEntity(ctx, e); err != nil {
+		t.Fatalf("stamp seed: %v", err)
+	}
+
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"upload new name":  putAttachmentAs(aliceCtx(), t, app, d, twinTicket, "screenshot", "b.txt", []byte("new")),
+		"upload same name": putAttachmentAs(aliceCtx(), t, app, d, twinTicket, "screenshot", "a.txt", []byte("new")),
+		"delete":           deleteAttachmentAs(aliceCtx(), t, app, d, twinTicket, "screenshot", "a.txt"),
+	} {
+		if rec.Code != http.StatusUnprocessableEntity || !bytes.Contains(rec.Body.Bytes(), []byte("/errors/externally_owned")) {
+			t.Errorf("%s: got %d %s, want 422 externally_owned", name, rec.Code, rec.Body)
+		}
+	}
+
+	infos, err := app.store.ListAttachments(ctx, twinTicket)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(infos) != 1 || infos[0].FileName != "a.txt" {
+		t.Errorf("attachments = %+v, want only screenshot/a.txt", infos)
+	}
+	get := getAttachmentAs(aliceCtx(), t, app, d, "ticket", "tickets", twinTicket, "screenshot", "a.txt")
+	if get.Body.String() != "original" {
+		t.Errorf("a.txt = %q, want the original bytes", get.Body)
+	}
+	if got := mustGet(t, app, twinTicket).GetString("screenshot"); got != stamped {
+		t.Errorf("screenshot = %q, want it unchanged", got)
 	}
 }

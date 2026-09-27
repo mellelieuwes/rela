@@ -62,6 +62,7 @@ func toV1EntityType(
 		// permission: it tells the SPA whether to offer a comment affordance
 		// at all, never that the caller may use it.
 		Commentable: metamodel.NewCommentPolicy(meta).Commentable(name),
+		Pacts:       schemaPacts(meta, name, def),
 	}
 	if prefixes := def.GetIDPrefixes(); len(prefixes) > 0 {
 		et.IDPrefix = prefixes[0]
@@ -71,6 +72,39 @@ func toV1EntityType(
 		et.Properties[propName] = toV1PropertyDef(meta, propDef)
 	}
 	return et
+}
+
+// schemaPacts renders the pacts of entity type name, sorted by system, or nil
+// when it has none (so the `pacts` key is omitted). Instructions — the agent
+// brief — stay off the wire.
+//
+// def short-circuits the common no-pacts type before the policy is built.
+func schemaPacts(meta *metamodel.Metamodel, name string, def metamodel.EntityDef) []v1.Pact {
+	if len(def.Pacts) == 0 {
+		return nil
+	}
+	policy := metamodel.NewPactPolicy(meta)
+	systems := policy.Systems(name)
+	out := make([]v1.Pact, 0, len(systems))
+	for _, system := range systems {
+		p, _ := policy.Pact(name, system)
+		out = append(out, v1.Pact{
+			System:  system,
+			Scope:   p.Scope(),
+			Theirs:  nonNilStrings(p.Theirs()),
+			Shared:  nonNilStrings(p.Shared()),
+			Propose: nonNilStrings(p.Propose()),
+		})
+	}
+	return out
+}
+
+// nonNilStrings serves an empty list as [] rather than null.
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func toV1PropertyDef(meta *metamodel.Metamodel, propDef metamodel.PropertyDef) v1.PropertyDef {
@@ -154,6 +188,7 @@ func (a *App) registerAPIV1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/_commands", a.handleV1Commands)
 	mux.HandleFunc("/api/v1/_transforms", a.export.handleV1Transforms)
 	mux.HandleFunc("/api/v1/_comments/", a.comments.handleV1Comments)
+	mux.HandleFunc(twinsPathPrefix, a.twins.handleV1Twins)
 	mux.HandleFunc("/api/v1/_templates/", a.handleV1Templates)
 	mux.HandleFunc("/api/v1/_views/", a.views.handleV1Views)
 	a.registerCopyRoutes(mux)

@@ -48,7 +48,7 @@ vi.mock('vue-router', () => ({
 const OLD = 'The old sentence stands here.'
 const NEW = 'The new sentence stands here.'
 
-function view(content: string): ViewResponse {
+function view(content: string, contentWritable?: boolean): ViewResponse {
   const v: ViewResponse = {
     entry: {
       id: 'TKT-1',
@@ -57,6 +57,7 @@ function view(content: string): ViewResponse {
       properties: { title: 'Ticket' },
       content,
       _actions: { update: true },
+      content_writable: contentWritable,
     },
     sections: [
       {
@@ -141,6 +142,17 @@ describe('EntityDetail accepting a suggestion', () => {
     const w = await mountAndAccept()
     expect(acceptMock).not.toHaveBeenCalled()
     expect(errorSpy).toHaveBeenCalled()
+    expect(w.find('.content-body').text()).toContain(OLD)
+  })
+
+  // An external system owns the body through a twin: the server would refuse
+  // the accept with 422, so the page neither offers nor performs it.
+  it('neither offers nor performs an accept when the body is owned', async () => {
+    fetchViewMock.mockResolvedValue(view(OLD, false))
+    const w = await mountAndAccept()
+    expect(w.findComponent(CommentsPanel).props('canAccept')).toBe(false)
+    expect(commitMock).not.toHaveBeenCalled()
+    expect(acceptMock).not.toHaveBeenCalled()
     expect(w.find('.content-body').text()).toContain(OLD)
   })
 })

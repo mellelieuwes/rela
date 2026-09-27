@@ -96,6 +96,12 @@ const props = defineProps<{
    * starts from its related entities and never offers it to itself.
    */
   mentionSelf?: MentionSelf
+  /**
+   * Renders the body without letting it be edited (e.g. an external system
+   * owns it through a twin). The document stays selectable and readable; the
+   * toolbar is hidden, and nothing is emitted since nothing can change.
+   */
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -490,6 +496,7 @@ onMounted(async () => {
       // of by a parallel set of rules that would drift.
       ctx.update(editorViewOptionsCtx, (prev) => ({
         ...prev,
+        editable: () => !props.readonly,
         attributes: { ...(prev.attributes ?? {}), class: 'milkdown-prose md-body' },
       }))
       // Shared with the sandboxed app editor, so the two cannot serialize a
@@ -502,6 +509,9 @@ onMounted(async () => {
       // so every round-trip artifact reached the save path. There is now no
       // unguarded route out of this component.
       ctx.get(listenerCtx).markdownUpdated((_ctx, markdown) => {
+        // A read-only body can change only through a transaction nobody
+        // should have dispatched; whatever it was, it must not reach a save.
+        if (props.readonly) return
         const decision = decideEmit(markdown, originalValue, settledValue, dirty, lastEmitted)
         if (decision.action === 'report-drift') {
           // Refusing silently would lose the user's edit while the form still
@@ -614,6 +624,14 @@ watch(
   }
 )
 
+// The view caches `editable`; updating the ctx alone would not re-read it.
+watch(
+  () => props.readonly,
+  (readonly) => {
+    currentView()?.setProps({ editable: () => !readonly })
+  }
+)
+
 watch(
   () => props.modelValue,
   (next) => {
@@ -675,6 +693,8 @@ defineExpose({
    * write-back guard.
    */
   flush: () => {
+    // Same gate as the listener: a read-only body emits nothing.
+    if (props.readonly) return
     const markdown = serialize()
     const decision = decideEmit(markdown, originalValue, settledValue, dirty, lastEmitted)
     if (decision.action === 'report-drift') {
@@ -734,6 +754,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="milkdown-editor-shell">
     <EditorToolbar
+      v-if="!props.readonly"
       :inline-commands="inlineCommands"
       :block-commands="toolbarBlockCommands"
       :active-ids="activeIds"
@@ -797,8 +818,10 @@ onBeforeUnmount(() => {
          provider positions this element, and inside the contenteditable it
          would become part of the document being edited. -->
     <div ref="linkPanelRoot" class="link-panel-anchor" data-show="false">
+      <!-- Edit and Remove write the document, so a read-only body offers
+           neither. -->
       <LinkTooltip
-        v-if="linkUI.panelLink.value"
+        v-if="!props.readonly && linkUI.panelLink.value"
         :href="linkUI.panelLink.value.href"
         @edit="linkUI.openForPanel()"
         @unlink="onLinkUnlink"
@@ -808,6 +831,7 @@ onBeforeUnmount(() => {
     <EntityPickerModal :open="pickerOpen" @select="onPickerSelect" @close="onPickerClose" />
 
     <LinkDialog
+      v-if="!props.readonly"
       :open="linkUI.dialog.value.open"
       :initial-url="linkUI.dialog.value.initialUrl"
       :initial-text="linkUI.dialog.value.initialText"

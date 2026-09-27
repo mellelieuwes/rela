@@ -11,6 +11,10 @@ const props = defineProps<{
   value: unknown
   error?: string
   readonly?: boolean
+  // The server's explanation of a read-only verdict when it is more specific
+  // than policy (`_fields[name].reason`, e.g. "owned by basecamp" for a field
+  // an external system owns through a twin). Shown ahead of the field's help.
+  readonlyReason?: string
   // Sparse per-option allow map: only `false` entries appear; absent
   // keys default to allowed. An option is disabled when EITHER this
   // map denies it or the existing transition rules deny it — the two
@@ -45,7 +49,12 @@ const emit = defineEmits<{
 const fieldId = computed(() => `field-${props.field.property}`)
 const label = computed(() => props.field.label || props.field.property || '')
 const placeholder = computed(() => props.field.placeholder || '')
-const help = computed(() => props.field.help || props.propertyDef?.description || '')
+const help = computed(() => {
+  const own = props.field.help || props.propertyDef?.description || ''
+  // The server writes the reason as a finished sentence; shown verbatim.
+  const reason = props.readonly && props.readonlyReason ? props.readonlyReason : ''
+  return [reason, own].filter(Boolean).join(' · ')
+})
 
 // Resolve the widget once from config + property def. The registry
 // honours an explicit field.widget then falls back to type defaulting.

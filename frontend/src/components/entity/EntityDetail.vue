@@ -62,6 +62,8 @@ import CopyMenu from '@/components/entity/CopyMenu.vue'
 import FaceMenu from '@/components/entity/FaceMenu.vue'
 import DuplicateModal from '@/components/entity/DuplicateModal.vue'
 import WorldBadge from '@/components/entity/WorldBadge.vue'
+import TwinBadge from '@/components/entity/TwinBadge.vue'
+import { listTwins, type Twin } from '@/api/twins'
 import WorldBanner from '@/components/common/WorldBanner.vue'
 import { invokeCopy } from '@/api/copies'
 import type { CopyOffer, Face } from '@/types'
@@ -377,6 +379,32 @@ async function loadComments() {
   }
 }
 
+// ─── Twins ───────────────────────────────────────────────────────────────
+//
+// The entity's counterparts in external systems, fetched once per load like
+// comments, and only for a type the schema declares pacts for: a project
+// without twins never calls the route. Reset rather than kept when the type
+// has none, so a badge cannot survive navigation to an untwinned entity.
+const twins = ref<Twin[]>([])
+
+const twinsEnabled = computed(
+  () => (schemaStore.getEntityType(props.entityType)?.pacts?.length ?? 0) > 0
+)
+
+async function loadTwins() {
+  if (!twinsEnabled.value) {
+    twins.value = []
+    return
+  }
+  try {
+    twins.value = await listTwins(props.entityType, props.entityId)
+  } catch {
+    // Same reasoning as loadComments: "cannot read, or no pact" is one
+    // answer on purpose, and the page must render without the badges.
+    twins.value = []
+  }
+}
+
 const checkboxStats = computed(() => {
   const c = entryContentSection.value?.content
   return c ? getCheckboxStats(c) : null
@@ -502,8 +530,16 @@ const contentAutoSave = useAutoSave({
 // and undo the change, or fail its version check. Pending saves are flushed
 // first, and toggles are refused while the accept is in flight.
 const accepting = ref(false)
+// False when an external system owns the body through a twin: the server then
+// refuses any body change with 422, so the page offers none. Only an explicit
+// `false` counts; absent means writable, as on DynamicForm.
+const contentWritable = computed(() => entry.value?.content_writable !== false)
 const canAccept = computed(
-  () => canUpdate.value && !accepting.value && contentAutoSave.status.value !== 'saving'
+  () =>
+    canUpdate.value &&
+    contentWritable.value &&
+    !accepting.value &&
+    contentAutoSave.status.value !== 'saving'
 )
 
 async function acceptSuggestion(c: Comment) {
@@ -642,6 +678,12 @@ function handleCheckboxToggle(index: number) {
   // `v-if` the way a button can, so the affordance gate lives at the handler.
   if (!canUpdate.value) {
     uiStore.warning('Update not permitted for this entity')
+    return
+  }
+  // Refused before the optimistic apply: the server would answer 422, and a
+  // box ticked on screen with nothing behind it looks like a saved change.
+  if (!contentWritable.value) {
+    uiStore.warning('This content is kept in sync with an external system; change it there.')
     return
   }
   if (accepting.value) {
@@ -834,9 +876,9 @@ async function loadView() {
       // for the response of a sentinel PATCH.
       contentAutoSave.recordServerSnapshot(viewData.value.entry)
     }
-    // loadComments swallows its own failures (see its doc): a comment-service
-    // problem must not fail the entity view it decorates.
-    await Promise.all([loadCommands(), loadScopeNav(), loadComments()])
+    // loadComments and loadTwins swallow their own failures (see their docs):
+    // a decoration service problem must not fail the entity view it decorates.
+    await Promise.all([loadCommands(), loadScopeNav(), loadComments(), loadTwins()])
   } catch (err) {
     if (isCancelledFetch(err)) return
     error.value = getErrorMessage(err, 'Failed to load entity')
@@ -1821,6 +1863,9 @@ function treeContainsEntity(nodes: ViewTreeNode[] | undefined, id: string): bool
         <div class="header-info">
           <span class="entity-type-badge">{{ typeDef?.label || entityType }}</span>
           <h1 class="text-wrap-anywhere">{{ entryTitle }}</h1>
+          <div v-if="twins.length" class="twin-badges">
+            <TwinBadge v-for="tw in twins" :key="`${tw.system}/${tw.external_id}`" :twin="tw" />
+          </div>
         </div>
         <!-- Desktop actions -->
         <div v-if="!props.hideActions" class="header-actions desktop-actions">
@@ -2788,6 +2833,12 @@ function treeContainsEntity(nodes: ViewTreeNode[] | undefined, id: string): bool
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
+}
+
+.twin-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
 }
 
 .entity-type-badge {

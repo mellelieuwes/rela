@@ -136,20 +136,7 @@ func New(meta *metamodel.Metamodel, opts ...Option) *appbuild.Services {
 	if meta == nil {
 		panic("appbuildtest.New: meta is required")
 	}
-	cfg := &testConfig{}
-	for _, opt := range opts {
-		opt(cfg)
-	}
-	if cfg.fs == nil || cfg.paths == nil {
-		cfg.fs, cfg.paths = defaultMemFS()
-	} else if cfg.paths.CacheDir == "" {
-		// Caller-supplied Paths without CacheDir is a common test
-		// oversight; default it to <root>/.rela so the fixture's
-		// state.KV setup still works. Production project.Discover
-		// always sets this. The path doesn't have to exist on the
-		// FS yet — state.NewFSKV creates it lazily on first write.
-		cfg.paths.CacheDir = cfg.paths.Root + "/.rela"
-	}
+	cfg := resolveConfig(opts)
 
 	searchBackend := newSearchBackend()
 	st := resolveStore(cfg.store, searchBackend)
@@ -207,6 +194,7 @@ func New(meta *metamodel.Metamodel, opts ...Option) *appbuild.Services {
 		),
 		Transitions:     tw.Enforcer,
 		FieldGate:       entitymanager.AllowAllFieldGate{},
+		Twins:           entitymanager.NoTwinOwnership{},
 		TransitionGuard: tw.Guard,
 		TransitionGraph: tw.Graph,
 		// The copy deps (TKT-WRLDAPI item 5), all three taken from the same
@@ -271,6 +259,25 @@ func New(meta *metamodel.Metamodel, opts ...Option) *appbuild.Services {
 		panic(fmt.Sprintf("appbuildtest.New: assemble services: %v", err))
 	}
 	return svc
+}
+
+// resolveConfig applies opts and fills in the filesystem defaults.
+func resolveConfig(opts []Option) *testConfig {
+	cfg := &testConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	if cfg.fs == nil || cfg.paths == nil {
+		cfg.fs, cfg.paths = defaultMemFS()
+	} else if cfg.paths.CacheDir == "" {
+		// Caller-supplied Paths without CacheDir is a common test
+		// oversight; default it to <root>/.rela so the fixture's
+		// state.KV setup still works. Production project.Discover
+		// always sets this. The path doesn't have to exist on the
+		// FS yet — state.NewFSKV creates it lazily on first write.
+		cfg.paths.CacheDir = cfg.paths.Root + "/.rela"
+	}
+	return cfg
 }
 
 // searchCloser returns the bleve index as an io.Closer, or nil when

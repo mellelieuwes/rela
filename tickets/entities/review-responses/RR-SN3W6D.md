@@ -1,0 +1,9 @@
+---
+id: RR-SN3W6D
+type: review-response
+title: 'Code review: Check ownership before attachment bytes change on an owned file property'
+finding: 'Pact fields may be any non-computed property, `file` properties included, and `theirs: ["*"]` (the headline example) owns all of them. `WriteAttachment` writes the new bytes (attachment.go:221) and, for max=1, deletes the old files (228-235) before the stamp `PatchEntity` runs (248). The ownership guard only runs inside that stamp. For an upload with a new name onto a twinned entity, the old file is therefore already gone when the stamp fails with TheirsWriteError. The property then points at a deleted file and the new file is orphaned. For a same-name upload the stamp value is unchanged, so the guard passes and the owned attachment''s bytes are replaced without any check. `deleteFile` deletes the bytes (275) before its refused stamp, with the same effect. The HTTP preflight (handlers_attachment.go attachmentWritePreflight), MCP attach_file/delete_attachment and CLI attach/detach have no ownership pre-check. Fix: give attachment.Deps a call-site `OwnedFields(ctx, type, id)` dependency (the twins service, or NoTwinOwnership). At the top of WriteAttachment and deleteFile, return `*entitymanager.TheirsWriteError` when propName or "*" is owned, before any store byte operation. Map it to 422 in the HTTP handler. Add a test: an upload or delete on an owned file property returns 422 and leaves the attachment list and the property unchanged.'
+severity: significant
+resolution: 'The attachment service has a required twin-ownership dependency and refuses upload/delete on an owned file property (or under `*`) before any byte or list operation; HTTP preflight answers 422 externally_owned, MCP passes the message through. Tests: TestService_OwnedFilePropertyIsRefusedBeforeBytesChange, TestAttachmentWrite_OwnedPropertyIs422BeforeBytes, TestAttachments_OwnedPropertyRefusesWrites.'
+status: addressed
+---

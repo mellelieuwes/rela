@@ -61,6 +61,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/store"
 	"github.com/Sourcehaven-BV/rela/internal/templating"
 	"github.com/Sourcehaven-BV/rela/internal/tracer"
+	"github.com/Sourcehaven-BV/rela/internal/twins"
 	"github.com/Sourcehaven-BV/rela/internal/userstate"
 	"github.com/Sourcehaven-BV/rela/internal/userstate/kvuserstate"
 	"github.com/Sourcehaven-BV/rela/internal/userstate/memuserstate"
@@ -166,7 +167,11 @@ type Services struct {
 	// comments is the commentary layer (internal/comments). Nil when the
 	// metamodel declares no `comments:` block — the feature then does not
 	// exist, and the data-entry app serves no comment routes.
-	comments     *comments.Service
+	comments *comments.Service
+	// twins is the twin sync service (internal/twins). Nil when the
+	// metamodel declares no pact. Exposed through the package function
+	// [Twins], not a method (plimsoll cap).
+	twins        *twins.Service
 	scriptEngine *script.Engine
 	searchCloser io.Closer
 	acl          acl.ACL
@@ -1649,7 +1654,7 @@ func buildEntityManager(
 	templater entitymanager.TemplateLoader, resolvedACL acl.ACL,
 	autoEngine *automation.Engine, cascadeRunner *autocascade.Runner,
 	readDeps lua.ReadDeps, versions store.VersionService, tw TransitionWiring,
-	computedSet *computed.Set,
+	computedSet *computed.Set, twinGuard entitymanager.TwinOwnership,
 ) (*entitymanager.Manager, error) {
 	mgr, err := entitymanager.New(entitymanager.Deps{
 		AliasRewriter:           aliases,
@@ -1666,6 +1671,7 @@ func buildEntityManager(
 		Computed:                computedSet,
 		Transitions:             tw.Enforcer,
 		FieldGate:               entitymanager.AllowAllFieldGate{},
+		Twins:                   twinGuard,
 		TransitionGuard:         tw.Guard,
 		TransitionGraph:         tw.Graph,
 		// The copy deps (TKT-WRLDAPI item 5). Before this, NONE of the three
@@ -1934,18 +1940,25 @@ func assemble(
 	if err != nil {
 		return nil, err
 	}
-	schedState := overrides.schedulerState
-	if schedState == nil {
-		if schedState, err = kvstate.New(stateKV); err != nil {
-			return nil, err
-		}
+	schedState, err := schedulerStateFor(overrides.schedulerState, stateKV)
+	if err != nil {
+		return nil, err
 	}
 	// coverage-ignore-end
 
+	// Twins are keyed by entity id like comments, so the service rides the
+	// same alias fanout. It is also the manager's ownership guard, while its
+	// own SyncWriter is the manager's twin-sync handle — a construction
+	// cycle, broken by binding the writer once the manager exists.
+	twinSvc, twinWriter, err := buildTwins(cfg.FS, cfg.Paths, base.meta, st, twinStoreGap)
+	if err != nil {
+		return nil, err
+	}
+
 	// Upstream's parameter order (readDeps after cascadeRunner) with the
-	// comment fanout wrapping the alias rewriter.
-	mgr, err := buildEntityManager(base, st, newAliasFanout(aliases, commentSvc), templater, resolvedACL,
-		autoEngine, cascadeRunner, readDeps, versions, tw, computedSet)
+	// comment and twin fanout wrapping the alias rewriter.
+	mgr, err := buildEntityManager(base, st, newAliasFanout(aliases, commentSvc, twinSvc), templater, resolvedACL,
+		autoEngine, cascadeRunner, readDeps, versions, tw, computedSet, twinOwnership(twinSvc))
 	// coverage-ignore-start: defensive: buildStateKV only errors when NewRootedFS fails on a non-empty CacheDir, which
 	// requires filepath.Abs to
 	// fail — unreachable with valid inputs (see the scupper in buildStateKV)
@@ -1953,6 +1966,7 @@ func assemble(
 		return nil, err
 	}
 	// coverage-ignore-end
+	twinWriter.bind(mgr)
 
 	val, err := validator.New(st, base.meta, readDeps, ungatedBinder(base.meta, st))
 	if err != nil { // coverage-ignore: defensive: validator.New only fails on a nil dep; all are built above
@@ -1994,9 +2008,19 @@ func assemble(
 
 	return newServices(
 		base, st, background, searcher, visible, searchCloser, mgr, tr, val,
-		templater, cfgLoader, stateKV, migState, jobQueue, aliases, commentSvc, versions,
+		templater, cfgLoader, stateKV, migState, jobQueue, aliases, commentSvc, twinSvc, versions,
 		resolvedACL, aclDeclarative, fieldRedactor, schedState,
 	), nil
+}
+
+// schedulerStateFor returns the recipe's scheduler run-state when it supplies
+// one, else kvstate over the state store (see
+// backendOverrides.schedulerState).
+func schedulerStateFor(override schedulerstate.Store, kv state.KV) (schedulerstate.Store, error) {
+	if override != nil {
+		return override, nil
+	}
+	return kvstate.New(kv)
 }
 
 // newServices bundles the assembled collaborators into the Services value.
@@ -2009,6 +2033,7 @@ func newServices(
 	mgr *entitymanager.Manager, tr tracer.Tracer, val validator.Validator,
 	templater templating.Templater, cfgLoader config.Loader, stateKV state.KV,
 	migState datamigration.StateStore, jobQueue jobs.Queue, aliases *caldavalias.Service, commentSvc *comments.Service,
+	twinSvc *twins.Service,
 	versions store.VersionService, resolvedACL acl.ACL, aclDeclarative *acl.Declarative,
 	fieldRedactor visibility.FieldRedactor, schedState schedulerstate.Store,
 ) *Services {
@@ -2038,6 +2063,7 @@ func newServices(
 		jobQueue:        jobQueue,
 		caldavAliases:   aliases,
 		comments:        commentSvc,
+		twins:           twinSvc,
 		scriptEngine:    cfg.ScriptEngine,
 		searchCloser:    searchCloser,
 		acl:             resolvedACL,

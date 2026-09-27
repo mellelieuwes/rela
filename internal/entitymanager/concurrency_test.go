@@ -112,6 +112,7 @@ func concurrencyManager(t *testing.T, st store.Store) *entitymanager.Manager {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	require.NoError(t, err)
 	return mgr
@@ -345,6 +346,7 @@ func TestConcurrency_PostAutomationRewriteKeepsInterleavedWrite(t *testing.T) {
 		FieldGate:   entitymanager.AllowAllFieldGate{},
 		Automations: engine,
 		Cascade:     runner,
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	require.NoError(t, err)
 

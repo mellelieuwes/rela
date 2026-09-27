@@ -361,6 +361,14 @@ type EntityDef struct {
 	// ABSENT (the common case) means no scoping: every surface sees every
 	// row, exactly as before this key existed.
 	QueryScopes map[string]string `yaml:"query_scopes,omitempty"`
+
+	// Pacts declares, per external system, which fields of this type that
+	// system owns — the contract its Twins are synced under (see [PactDef]).
+	// The map key is the system id.
+	//
+	// ABSENT (the common case) means the type has no twins, and the project
+	// behaves byte-identically to one without this key.
+	Pacts map[string]PactDef `yaml:"pacts,omitempty"`
 }
 
 // FaceDef declares one content state of an entity type.

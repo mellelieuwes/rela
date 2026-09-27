@@ -847,6 +847,125 @@ rela sync pull --force TKT-42  # resolve TKT-42: remote wins
 
 ---
 
+### rela twin
+
+Manage twins: an entity's counterparts in external systems, kept in sync by an
+agent that talks to the external system with its own tools. rela never calls
+the external system. Requires a `pacts:` block in the metamodel. See
+[Twins](twins.md) for the full design and a worked example.
+
+```bash
+rela twin link <entity-id> <system> <external-id> --url <url> [--remote-updated-at <RFC3339>]
+rela twin unlink <system> <external-id>
+rela twin show <entity-id>
+rela twin list [--system <system>] [--state <state>]
+rela twin pending [--system <system>]
+rela twin pull <system> <external-id> --remote <file|-> --remote-updated-at <RFC3339> [--force]
+rela twin pushed <system> <external-id> --version <version> [--remote-updated-at <RFC3339>]
+rela twin gone <system> <external-id>
+rela twin pact <entity-type> <system>
+```
+
+Every subcommand accepts `-o json`. Writes made by `rela twin` are audited
+with `tool: twin` and the real user.
+
+**Subcommands:**
+
+| Subcommand | Description |
+| ---------- | ----------- |
+| `link`     | Record that an entity has a counterpart in `<system>`. The entity type needs a pact with that system. The twin starts `pending` with no base. Refused when the external id is already linked in that system, when the entity already has a twin there that is not gone, or when the entity is locked by git-crypt. |
+| `unlink`   | Remove a twin. The entity is not touched. |
+| `show`     | List the twins of one entity, with state, findings and owned fields. |
+| `list`     | List twins, optionally filtered by system and state. |
+| `pending`  | The agent's work list: twins not `in_sync`, twins whose entity changed in rela since the last sync, and gone twins until unlinked. Each item carries its reasons, the entity `version`, and a `push_set` of ours and shared fields to write to the external item. A shared field in conflict is in the `push_set` only once it was changed in rela after the conflict. |
+| `pull`     | Reconcile what the agent read from the external item. Writes theirs fields and uncontested shared fields to the entity, records findings, and advances the twin. Refused on a gone twin. |
+| `pushed`   | Confirm that the external item now holds the `push_set` values: every ours field, and every shared field not in conflict or changed in rela after its conflict. Advances the base; clears `foreign_edit` findings and the conflicts resolved in rela. Other findings stay: the twin becomes `conflict` while a conflict remains, `pending` while a `local_drift` or `rejected` finding remains, and `in_sync` otherwise. Refused on a gone twin. |
+| `gone`     | Mark a twin gone because the external item no longer exists. The twin stays listed by `pending` until unlinked. |
+| `pact`     | Print the pact between an entity type and a system, including its `instructions` (the agent's brief). |
+
+**Flags:**
+
+| Flag                  | Subcommand | Description |
+| --------------------- | ---------- | ----------- |
+| `--url`               | `link`     | Required. URL of the external item. |
+| `--remote-updated-at` | `link`     | Optional. The external item's modification time (RFC 3339). |
+| `--system`            | `list`, `pending` | Only twins in this system. |
+| `--state`             | `list`     | Only twins in this state: `pending`, `in_sync`, `conflict` or `gone`. |
+| `--remote`            | `pull`     | Required. JSON file with the translated external values, or `-` for stdin. |
+| `--remote-updated-at` | `pull`     | Required. The external item's modification time as read (RFC 3339). A time older than the twin's stored one is refused as stale. |
+| `--force`             | `pull`     | Accept a pull older than the twin's stored modification time. |
+| `--version`           | `pushed`   | Required. The entity `version` from the `pending` item that was pushed. Refused when the entity has changed since. |
+| `--remote-updated-at` | `pushed`   | Optional. The external item's modification time after the push (RFC 3339). Without it, the stored time is kept. |
+
+**Remote input.** `pull` reads rela values, already translated by the agent:
+
+```json
+{"properties": {"status": "done", "due": null}, "body": "markdown"}
+```
+
+A property absent from `properties` is not mapped and left untouched; a
+`null` means the external side cleared it. The body goes in the top-level
+`body` key, never inside `properties`; likewise an absent `body` is not mapped
+and `"body": null` clears it. Any other top-level key is refused.
+
+**Pull outcomes.** A sync write refused by validation, a state-machine
+transition or a unique property does not fail the command: the twin records a
+`rejected` finding with the error message and stays `pending`. Read the
+findings, not only the exit status.
+
+**Errors.** The command exits non-zero with a clear message when the entity
+type has no pact with the system, the external id is invalid or already
+linked, the entity already has a twin in that system, a pull is stale, the
+`--version` of `pushed` is out of date, the entity changed during a pull (run
+it again), `pull` or `pushed` names a gone twin (unlink it first), or the twin
+changed while the command ran, for example because its entity was renamed (run
+it again). A live twin whose entity no longer exists is marked `gone`.
+
+**`pending -o json`** items:
+
+| Key             | Description |
+| --------------- | ----------- |
+| `system`, `external_id`, `url` | The twin |
+| `entity`        | `{type, id}` of the twinned entity |
+| `state`         | `pending`, `in_sync`, `conflict` or `gone` |
+| `reasons`       | Why it is listed, e.g. `never synced`, `changed in rela`, `conflict: status` |
+| `local_changed` | The entity changed in rela since the last sync |
+| `version`       | The entity's current version; pass it to `pushed --version` |
+| `push_set`      | `[{field, base, local}]`: ours and shared fields to write to the external item; a shared field in conflict only once it was changed in rela after the conflict |
+| `findings`      | `[{field, kind, base, ours, theirs, propose, message}]`; kind is `conflict`, `foreign_edit`, `local_drift` or `rejected` |
+
+`show`, `list`, `link`, `pull`, `pushed` and `gone` print twin objects with
+`system`, `external_id`, `url`, `entity`, `state` and `findings` as above,
+plus `has_base` (false until the first pull rela accepts or the first push; a
+pull that rela rejects leaves it as it was), `version` (the entity
+version recorded at the last link, pull or push; `pushed --version` wants the
+one from `pending`), and `synced_at` and `remote_updated_at` (RFC 3339,
+omitted when never set). `pull` adds `applied`, the fields it wrote to the
+entity; `show` adds `owned_fields`, the fields each twin's system owns.
+`unlink -o json` prints `{system, external_id, unlinked}`; `pact -o json`
+prints `{entity_type, system, scope, theirs, shared, ours, propose,
+instructions}`.
+
+**Examples:**
+
+```bash
+rela twin pact scenario basecamp            # read the agent brief
+rela twin link SC-015 basecamp 7654321098 \
+  --url https://app.basecamp.com/5734045/buckets/35926565/todos/7654321098
+translate-todo 7654321098 | rela twin pull basecamp 7654321098 \
+  --remote - --remote-updated-at 2026-09-20T14:03:11Z
+rela twin pending --system basecamp -o json
+rela twin pushed basecamp 7654321311 --version 9b2e71c40d5a \
+  --remote-updated-at 2026-09-21T09:12:40Z
+rela twin gone basecamp 7654321100
+rela twin unlink basecamp 7654321100
+```
+
+`translate-todo` stands for the agent's own code that reads the Basecamp todo
+and prints the remote JSON.
+
+---
+
 ### rela trace
 
 Trace dependencies between entities.

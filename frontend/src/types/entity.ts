@@ -45,6 +45,11 @@ export interface Entity {
   // Names only; values stay withheld. Present (possibly empty) on
   // per-entity responses, absent on list rows.
   _redacted?: string[]
+  // Whether a write may change `content` (the markdown body). `false` when an
+  // external system owns the body through a twin; the server then refuses a
+  // changed body with 422 and the body editor renders disabled. Present on
+  // per-entity responses, absent on list rows — only `false` disables.
+  content_writable?: boolean
   // Per-relation-type affordances on per-entity GET responses. Same
   // sparse / closed-world semantics as _fields. Per-relation-type
   // uniform — per-link verdicts are predicate territory (deferred).
@@ -119,9 +124,14 @@ export interface Mention {
 // the wire. Sparse: `writable` undefined means default (writable);
 // `options` lists only the false entries (allowed options are
 // implicit via the metamodel).
+//
+// `reason` explains a `writable: false` verdict when its cause is more
+// specific than policy read-only — "owned by basecamp" for a field an
+// external system owns through a twin.
 export interface FieldAffordance {
   writable?: boolean
   options?: Record<string, boolean>
+  reason?: string
 }
 
 // RelationAffordance carries per-relation-type affordances on the

@@ -87,6 +87,12 @@ type Manager struct {
 	// dispatch sites, which pass `m.gated()` as the Mutator), so elevation
 	// never propagates to descendant writes.
 	bypassACL bool
+
+	// twinSync marks the twin-sync write handle ([TwinSyncWriter]): its
+	// PatchEntity/UpdateEntity skip the twin-ownership check and nothing
+	// else. Stripped by gated() exactly like bypassACL, so a cascade the
+	// sync write triggers cannot write owned fields.
+	twinSync bool
 }
 
 // elevated returns a throwaway Manager handle whose writes skip the ACL deny.
@@ -107,16 +113,17 @@ func (m *Manager) Elevated() autocascade.Mutator {
 	return m.elevated()
 }
 
-// gated returns a non-elevated Manager sharing the receiver's deps. On a normal
-// Manager it returns the receiver; on an elevated handle it strips the bypass.
-// Used at cascade-dispatch sites so a nested cascade triggered by an elevated
-// write runs with normal ACL authority — elevation does not propagate to
-// descendants (the leak the ctx-marker approach would have had).
+// gated returns a non-elevated, non-twin-sync Manager sharing the receiver's
+// deps. On a normal Manager it returns the receiver; on an elevated or
+// twin-sync handle it strips the capability. Used at cascade-dispatch sites
+// so a nested cascade triggered by such a write runs with normal authority —
+// neither capability propagates to descendants (the leak the ctx-marker
+// approach would have had).
 func (m *Manager) gated() *Manager {
-	if !m.bypassACL {
+	if !m.bypassACL && !m.twinSync {
 		return m
 	}
-	return &Manager{deps: m.deps, bypassACL: false}
+	return &Manager{deps: m.deps}
 }
 
 // Compile-time assertion: Manager must satisfy the autocascade.Mutator
@@ -278,6 +285,13 @@ type Deps struct {
 	// out explicitly. This used to say "required in spirit and nil-tolerant
 	// in practice", which is exactly the gap [requireCopyGates] closes.
 	CopyReadGate CopyReadGate
+
+	// Twins answers which fields of an entity an external system owns
+	// through a twin; caller-authored changes to them are refused (see
+	// [TheirsWriteError]). Required — pass [NoTwinOwnership] when the schema
+	// declares no pacts. A nil value would silently disable the ownership
+	// contract, the forgotten-wiring failure FieldGate is required against.
+	Twins TwinOwnership
 }
 
 // FieldWriteGate answers whether the ctx principal may write the named
@@ -463,6 +477,10 @@ func New(d Deps) (*Manager, error) {
 		return nil, errors.New(
 			"entitymanager: New: FieldGate is required (use entitymanager.AllowAllFieldGate{} to opt out)")
 	}
+	if d.Twins == nil {
+		return nil, errors.New(
+			"entitymanager: New: Twins is required (use entitymanager.NoTwinOwnership{} to opt out)")
+	}
 	if (d.Automations == nil) != (d.Cascade == nil) {
 		return nil, errors.New(
 			"entitymanager: New: Automations and Cascade must be supplied together (both non-nil or both nil)",
@@ -617,8 +635,9 @@ func isAffordanceProbe(ctx context.Context) bool {
 // entitymanager's wire-facing error shape (TKT-E4LW2). A guard denial becomes
 // an [*acl.ForbiddenError] (RuleKind "transition-guard") so it flows through
 // the same 403 path — and audit row — as any other authorization denial;
-// legality and precondition failures pass through unchanged and surface as 422
-// validation-class errors at the HTTP boundary. Returns nil for a nil input.
+// legality and precondition failures surface as 422 validation-class errors
+// at the HTTP boundary, wrapped only to carry the WriteRejected marker (see
+// [transitionRejectedError]). Returns nil for a nil input.
 func (m *Manager) mapTransitionError(ctx context.Context, subject acl.Subject, err error) error {
 	if err == nil {
 		return nil
@@ -633,6 +652,12 @@ func (m *Manager) mapTransitionError(ctx context.Context, subject acl.Subject, e
 		}
 		m.recordDeniedWrite(ctx, decision, acl.WriteRequest{Op: acl.OpUpdate, Subject: subject})
 		return &acl.ForbiddenError{Decision: decision}
+	}
+	if errors.Is(err, statemachine.ErrIllegalTransition) ||
+		errors.Is(err, statemachine.ErrPreconditionFailed) ||
+		errors.Is(err, statemachine.ErrIllegalEntry) {
+
+		return transitionRejectedError{err: err}
 	}
 	return err
 }
@@ -944,6 +969,11 @@ func (m *Manager) UpdateEntity(ctx context.Context, e *entity.Entity) (*entity.U
 	if err := rejectComputedChanges(m.deps, oldEntity, e); err != nil {
 		return nil, err
 	}
+	if !m.twinSync {
+		if err := rejectTheirsChanges(ctx, m.deps, oldEntity, e); err != nil {
+			return nil, err
+		}
+	}
 
 	// Unconditional: UpdateEntity is the whole-entity save, whose caller owns
 	// every field. A caller wanting compare-and-swap uses PatchEntity with
@@ -966,7 +996,7 @@ func (m *Manager) UpdateEntity(ctx context.Context, e *entity.Entity) (*entity.U
 //
 // **Ordering is load-bearing** (RR-32XA5V):
 //
-//	read → locked-check → authorize → field gate → merge → updateCore
+//	read → locked-check → authorize → field gate → merge → twin guard → updateCore
 //
 // The read comes first because the ACL subject needs the entity's real
 // type and the caller supplied only an id — the same shape, and the same
@@ -980,6 +1010,11 @@ func (m *Manager) UpdateEntity(ctx context.Context, e *entity.Entity) (*entity.U
 // silently drops some property writes is the confusing contract
 // lua.WriteDeps.ElevatedManager exists to avoid — and the bypass is still
 // recorded by authorizeAndAudit (RR-BA1NIV).
+//
+// Elevation does NOT lift twin ownership: a field an external system owns
+// is refused with [TheirsWriteError] on every handle but [TwinSyncWriter]'s,
+// because the ACL decides who may write rela, while a pact decides which
+// system a field lives in (see rejectTheirsChanges).
 //
 // # Compare-and-swap (TKT-34XS2R)
 //
@@ -1090,6 +1125,13 @@ func (m *Manager) patchEntityOnce(
 
 	updated := stored.Clone()
 	p.Apply(updated)
+	// Twin ownership is change-based, so it needs the merged result; it
+	// applies under elevation too (see rejectTheirsChanges).
+	if !m.twinSync {
+		if err := rejectTheirsChanges(ctx, m.deps, stored, updated); err != nil {
+			return nil, err
+		}
+	}
 
 	expected := p.ExpectedVersion
 	if pinToRead {
@@ -1170,7 +1212,7 @@ func (m *Manager) updateCore(
 	// the fixed write pipeline, so no update path can skip legality/guard/
 	// precondition. An empty enforcer (metamodel with no transitions) is a
 	// no-op.
-	if err := m.deps.Transitions.EnforceUpdate(
+	if err = m.deps.Transitions.EnforceUpdate(
 		ctx, oldEntity, e, m.deps.TransitionGuard, m.deps.TransitionGraph,
 	); err != nil {
 		return nil, m.mapTransitionError(ctx, acl.NewEntitySubject(e.Type, e.ID, e.Face), err)
@@ -1187,11 +1229,15 @@ func (m *Manager) updateCore(
 	// The CAS precondition rides down to the store, which is the only layer
 	// that can compare-and-write atomically. Empty expectedVersion yields the
 	// zero condition: an unconditional write, for a caller that owns the
-	// whole entity (UpdateEntity).
+	// whole entity (UpdateEntity). The version the store returns is the
+	// post-write token (UpdateResult.Version), kept for callers that chain a
+	// compare-and-swap on it (twins).
+	var version store.EntityVersion
 	if err := writeWithUniqueCheck(ctx, m.deps, e, e.ID, func(st store.Store) error {
-		_, werr := st.UpdateEntityIf(ctx, e, store.UpdateCondition{
+		v, werr := st.UpdateEntityIf(ctx, e, store.UpdateCondition{
 			ExpectedVersion: store.EntityVersion(expectedVersion),
 		})
+		version = v
 		return werr
 	}); err != nil {
 		var invalid *ValidationError
@@ -1212,6 +1258,7 @@ func (m *Manager) updateCore(
 		// concurrent losers into 500s, silently.
 		return nil, fmt.Errorf("write entity: %w", err)
 	}
+	result.Version = string(version)
 
 	// Audit the durable write now, before the cascade run. The entity
 	// is already persisted; gating the audit on cascade success left a

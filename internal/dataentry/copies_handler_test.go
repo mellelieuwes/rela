@@ -161,6 +161,27 @@ func TestCopiesHandler_KernelRefusalsAre422(t *testing.T) {
 	}
 }
 
+// TestCopiesHandler_OwnedTargetIs422ExternallyOwned: a copy the kernel refuses
+// because it would change a twin-owned field of the target answers the same
+// 422 externally_owned as every other write, not a 500.
+func TestCopiesHandler_OwnedTargetIs422ExternallyOwned(t *testing.T) {
+	t.Parallel()
+	svc := &stubCopyService{err: fmt.Errorf("copy: %w", &entitymanager.TheirsWriteError{
+		Type: "ticket", ID: "TKT-2", Fields: []string{"title"}, Systems: []string{"basecamp"},
+	})}
+	h := newCopyTestHandler(t, svc)
+	rec := serveCopies(h, http.MethodPost, "/api/v1/_copies/spawn",
+		`{"source_id":"TKT-1","target_id":"TKT-2"}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "/errors/externally_owned") ||
+		!strings.Contains(rec.Body.String(), "owned by basecamp") {
+
+		t.Errorf("body = %s, want the externally_owned problem naming basecamp", rec.Body)
+	}
+}
+
 // TestCopiesHandler_InfrastructureErrorsAre500AndGeneric pins the fourth arm.
 // A store fault wrapped by the kernel used to arrive as a 422 whose detail was
 // the raw error text — on pgstore, SQL error text — exactly what every other

@@ -15,6 +15,7 @@ exclude:
   - internal/mail/mailtest
   - internal/userstate/userstatetest
   - internal/comments/commentstest
+  - internal/twins/twinstest
   - internal/schedulerstate/schedulerstatetest
   - frontend
   - e2e
@@ -137,6 +138,9 @@ components:
   filecomments:     { in: internal/comments/filecomments }
   pgcomments:       { in: internal/comments/pgcomments }
   sqlitecomments:   { in: internal/comments/sqlitecomments }
+  twins:            { in: internal/twins }
+  memtwins:         { in: internal/twins/memtwins }
+  filetwins:        { in: internal/twins/filetwins }
   schedulerstate:   { in: internal/schedulerstate }
   kvschedstate:     { in: internal/schedulerstate/kvstate }
   pgschedstate:     { in: internal/schedulerstate/pgschedstate }
@@ -418,6 +422,8 @@ deps:
       - templating
       - tracer
       - transform
+      # `rela twin` is the agent's interface to the twin service.
+      - twins
       - validator
     canUse:
       - kong
@@ -465,6 +471,9 @@ deps:
       # above, that is a wiring-site decision, so only the `comments` package
       # is granted here, never filecomments/memcomments.
       - comments
+      # Twins (read-out route + field ownership verdicts). Same rule as
+      # comments: the `twins` service only, never filetwins/memtwins.
+      - twins
       - cmdexec
       - config
       - conflict
@@ -648,6 +657,11 @@ deps:
       - filecomments
       - pgcomments
       - sqlitecomments
+      # Twins (stage 1): the root builds the file backend and hands the service
+      # to entitymanager as its ownership guard; the database builds have no
+      # twin backend yet and refuse pacts instead.
+      - twins
+      - filetwins
       - datamigration
       # The migration-state backends, selected here for the same reason as the
       # comment backends: the recipe owns the handle each one needs, and the
@@ -1061,6 +1075,9 @@ deps:
       - autocascade
       - automation
       - computed
+      # canonical's normalizing equality decides whether a write changed a
+      # twin-owned field (the same comparison the twin sync reconciles with).
+      - canonical
       - metamodel
       - principal
       - statemachine
@@ -1248,6 +1265,33 @@ deps:
     mayDependOn:
       - comments
       - entity
+  # twins tracks an entity's counterparts in external systems (Basecamp,
+  # GitHub): bookkeeping ABOUT entities, not graph content, for the reason
+  # comments is not. It reads pacts from the metamodel and compares values
+  # through canonical (the hash's own normalization, so a representation
+  # difference is never a change), but deliberately depends on neither store
+  # nor entitymanager: the entity reader and the sync writer are call-site
+  # interfaces the composition root fills, and errors are classified
+  # structurally (EntityNotFound / WriteRejected), not by importing their types.
+  twins:
+    mayDependOn:
+      - canonical
+      - entity
+      - metamodel
+  memtwins:
+    mayDependOn:
+      - entity
+      - twins
+  # The default backend: one YAML document per twin through the shared storage
+  # seam, plus an flock (x/sys, as sqlitedb) so the CLI and a running server
+  # serialise their read-modify-writes.
+  filetwins:
+    mayDependOn:
+      - storage
+      - twins
+    canUse:
+      - xsys
+      - yaml
   # schedulerstate is the per-task scheduler bookkeeping seam (last successful
   # run, failure count, next retry). Deliberately NOT dependent on store: a
   # last-run stamp is a fact about a deployment's operation, not graph content,

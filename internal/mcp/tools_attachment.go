@@ -137,6 +137,8 @@ type WriteAuthorizer interface {
 // processor applies the metamodel's MIME allowlist and, when runner is
 // non-nil, its scan and transform commands; with a nil runner a configured
 // scan rejects the upload (fail closed). limit is capped at [MaxUploadBytes].
+// twins refuses uploads and deletes on a file property an external system
+// owns.
 //
 // st is the raw store: [attachment.Service] reads and writes attachment bytes
 // through it. The tools only reach it after the gated entity read has
@@ -148,7 +150,7 @@ type WriteAuthorizer interface {
 // pass the same authorizer as [AttachmentDeps.Authorizer].
 func NewAttachmentSnapshot(
 	st store.Store, em attachment.EntityPatcher, locker attachment.Locker, authz WriteAuthorizer,
-	meta *metamodel.Metamodel, runner attachment.CommandRunner, limit int64,
+	twins attachment.TwinOwnership, meta *metamodel.Metamodel, runner attachment.CommandRunner, limit int64,
 ) (AttachmentSnapshot, error) {
 	if authz == nil {
 		return AttachmentSnapshot{}, errors.New("mcp: NewAttachmentSnapshot: authz is required")
@@ -159,6 +161,7 @@ func NewAttachmentSnapshot(
 		EntityManager: em,
 		Locker:        locker,
 		Authorizer:    attachmentAuthorizer{authz},
+		Twins:         twins,
 		Processor:     attachment.NewPolicyProcessor(meta, runner),
 	})
 	if err != nil {
@@ -618,13 +621,17 @@ func (h attachmentHandler) writeError(
 }
 
 // callerError answers a failed attachment write. Errors written for the
-// caller (an ACL denial, a validation failure, an ambiguous delete) are
-// returned as they are. Anything else may be a store error naming tables,
-// columns or paths, so it is logged and answered generically.
+// caller (an ACL denial, a validation failure, an externally owned property,
+// an ambiguous delete) are returned as they are. Anything else may be a store
+// error naming tables, columns or paths, so it is logged and answered
+// generically.
 func callerError(entityID, property string, err error) *mcpgo.CallToolResult {
 	var denied *acl.ForbiddenError
 	var invalid *entitymanager.ValidationError
-	if errors.As(err, &denied) || errors.As(err, &invalid) || errors.Is(err, attachment.ErrNoFileToDetach) {
+	var owned *entitymanager.TheirsWriteError
+	if errors.As(err, &denied) || errors.As(err, &invalid) || errors.As(err, &owned) ||
+		errors.Is(err, attachment.ErrNoFileToDetach) {
+
 		return errorResult(err.Error())
 	}
 	slog.Warn("mcp: attachment write failed", "err", err, "entity", entityID, "property", property)

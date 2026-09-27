@@ -69,6 +69,7 @@ func ceilingManager(t *testing.T) (mgr *entitymanager.Manager, seededID string) 
 		ACL:         decl,
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		// Not a copy test: opt out of the copy read gates explicitly, which is
 		// what New requires of a policy-backed Deps (#1437).
 		CopyReadGate:   entitymanager.AllowAllCopyReadGate{},
