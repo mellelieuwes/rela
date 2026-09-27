@@ -789,9 +789,14 @@ export class FormPage extends BasePage {
     return this.mentionMenu.locator(".mention-menu-item.is-highlighted");
   }
 
-  /** The chip showing the type the search is scoped to. */
+  /** The chip in the menu naming the type the search is scoped to. */
   get mentionMenuScopeChip(): Locator {
     return this.mentionMenu.locator(".mention-menu-chip");
+  }
+
+  /** The `@type:` scope as drawn in the document while the menu owns it. */
+  get editorScopeChip(): Locator {
+    return this.proseMirror.locator(".mention-scope-chip");
   }
 
   get mentionMenuNote(): Locator {

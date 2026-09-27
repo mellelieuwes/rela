@@ -17,13 +17,11 @@
 import { rankMentions } from './rankMentions'
 
 /**
- * Below this length the menu prompts rather than searching.
+ * Below this length the app editor's menu prompts rather than searching.
  *
- * The backtick flow this replaced could list a type's entities on an empty
- * query, because the user had already chosen a type. `@` has no type to scope
- * by, and there is no cross-type listing endpoint: `listEntities` resolves a
- * per-type URL and throws on an unknown type. Searching for one character
- * across every type returns relevance-scored noise.
+ * Searching for one character across every type returns relevance-scored
+ * noise. The SPA menu replaces this rule with its own stages through
+ * `MentionMenuOptions.shouldSearch`.
  */
 export const MIN_SEARCH_LEN = 2
 const SEARCH_DEBOUNCE_MS = 150
@@ -37,6 +35,7 @@ export interface MentionMenuSnapshot<T> {
   query: string
   items: T[]
   highlightedIndex: number
+  /** True while a search request is in flight (not during the debounce). */
   loading: boolean
   errorMsg: string
 }
@@ -58,8 +57,17 @@ export interface MentionMenuMachine<T> {
   readonly state: Readonly<MentionMenuSnapshot<T>>
   /** The shortest query that triggers a search; below it the menu prompts. */
   readonly minQueryLength: number
-  /** Opens the menu, or updates the query if it is already open. */
-  setQuery(query: string): void
+  /**
+   * Opens the menu, or updates the query if it is already open.
+   *
+   * With `reset`, the rows on screen are dropped at once instead of staying
+   * until the new search lands. Pass it when the new query asks a different
+   * question (another scope, or the starting list), where the old rows would
+   * be wrong rather than merely stale.
+   */
+  setQuery(query: string, reset?: boolean): void
+  /** True while a search is debouncing or in flight. */
+  pending(): boolean
   close(): void
   moveHighlight(delta: number): void
   setHighlight(index: number): void
@@ -70,6 +78,22 @@ export interface MentionMenuMachine<T> {
 
 export interface MentionMenuOptions<T> {
   search: MentionSearchFn<T>
+  /**
+   * Whether a query is searched at all. Below it the menu shows no rows.
+   *
+   * Defaults to "at least `MIN_SEARCH_LEN` characters", which is the app
+   * editor's rule. The SPA menu decides per stage (`mentionPlan.ts`): an empty
+   * query loads the starting list, and one or two letters show only types.
+   */
+  shouldSearch?: (query: string) => boolean
+  /**
+   * Orders a response for display, best first.
+   *
+   * Defaults to `rankMentions` against the query. The SPA passes the text it
+   * actually searched for, which differs from the query under a scope such
+   * as `ticket:fa`, and keeps the starting list in its own order.
+   */
+  rank?: (items: T[], query: string) => T[]
   /** Called after every state change, so the renderer can repaint. */
   onChange?: () => void
   /**
@@ -99,6 +123,9 @@ export function createMentionMenuMachine<T extends { id?: string }>(
     loading: false,
     errorMsg: '',
   }
+
+  const shouldSearch = options.shouldSearch ?? ((q: string) => q.length >= MIN_SEARCH_LEN)
+  const rank = options.rank ?? rankMentions
 
   let searchTimer: ReturnType<typeof setTimeout> | null = null
   let abort: AbortController | null = null
@@ -133,7 +160,7 @@ export function createMentionMenuMachine<T extends { id?: string }>(
       // Rank THEN slice, in that order. `rankMentions` promotes an exact or
       // prefix ID match ahead of the fuzzy order, so slicing first would drop a
       // target sitting past the cut before the promotion could reach it.
-      state.items = rankMentions(items, query).slice(0, MAX_RESULTS)
+      state.items = rank(items, query).slice(0, MAX_RESULTS)
       state.errorMsg = ''
       state.highlightedIndex = 0
     } catch (err: unknown) {
@@ -153,13 +180,17 @@ export function createMentionMenuMachine<T extends { id?: string }>(
     state,
     minQueryLength: MIN_SEARCH_LEN,
 
-    setQuery(query: string): void {
+    setQuery(query: string, reset = false): void {
       if (disposed) return
       state.open = true
       state.query = query
       cancelPending()
+      if (reset) {
+        state.items = []
+        state.highlightedIndex = 0
+      }
       const gen = ++generation
-      if (query.length < MIN_SEARCH_LEN) {
+      if (!shouldSearch(query)) {
         // Show the prompt rather than a stale result set from a longer query
         // the user has just backspaced away from.
         state.items = []
@@ -169,11 +200,17 @@ export function createMentionMenuMachine<T extends { id?: string }>(
         changed()
         return
       }
-      changed()
+      // The timer is set BEFORE notifying, so a listener asking `pending()`
+      // already sees the search as due.
       searchTimer = setTimeout(() => {
         searchTimer = null
         void runSearch(query, gen)
       }, SEARCH_DEBOUNCE_MS)
+      changed()
+    },
+
+    pending(): boolean {
+      return searchTimer !== null || state.loading
     },
 
     close(): void {

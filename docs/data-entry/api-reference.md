@@ -71,6 +71,22 @@ unchanged: they always carry `content`, as do ETags computed over it. A row
 whose entity has an empty body looks the same with or without the flag, which
 is the reason the field is omitted rather than sent empty.
 
+## Limiting search results
+
+`GET /api/v1/_search` accepts an optional `limit` (an integer from 1 to 100)
+that caps the number of rows returned. The cap applies after the read gate, the
+`type` filter and any `sort:` clause, so it counts only rows the caller may see.
+Any other value is a `400 invalid_limit`.
+
+The limit shrinks the response, not the server's work: the query still reads
+and sorts every matching row before the cut.
+
+```text
+GET /api/v1/_search?q=type:ticket,feature sort:modified:desc&limit=8
+```
+
+The editor's `@` mention menu uses this form to list recently modified entities.
+
 ## Relations field
 
 Each value of the `relations` map is one of TWO shapes:

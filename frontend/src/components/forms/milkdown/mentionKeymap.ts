@@ -2,12 +2,14 @@
  * Keyboard handling for the `@` completion menu.
  *
  * Extracted from `MilkdownEditor.vue` so the menu's key semantics are testable
- * without mounting an editor, and so the component does not keep growing (it
- * sits on the 500-line god-component limit). The editor still owns the document
- * and the slash provider; this only decides what a keystroke MEANS while the
- * menu is open, and calls back for the parts that touch ProseMirror.
+ * without mounting an editor, and so the component does not keep growing. The
+ * editor still owns the document and the slash provider; this only decides
+ * what a keystroke MEANS while the menu is open, and calls back for the parts
+ * that touch ProseMirror.
+ *
+ * Backspace has no case here. A type scope is document text (`@ticket:`), so
+ * deleting its `:` unscopes the query through ordinary editing.
  */
-import { shouldClearScopeOnBackspace } from './mentionQuery'
 import type { MentionChoice, MentionMenuController } from './useMentionMenu'
 
 /**
@@ -17,9 +19,7 @@ import type { MentionChoice, MentionMenuController } from './useMentionMenu'
  * each member is one thing the handler cannot do for itself.
  */
 export interface MentionKeymapHost {
-  /** The paragraph text before the cursor, or undefined outside a mention. */
-  queryText: () => string | undefined
-  /** Acts on the highlighted row: insert an entity, or scope to a type. */
+  /** Acts on a row: insert an entity, or scope to a type. */
   commit: (choice: MentionChoice) => void
   /** Closes the menu and remembers the dismissed query so it stays shut. */
   dismiss: (query: string) => void
@@ -31,18 +31,14 @@ export interface MentionKeymapHost {
  * Must be bound in the CAPTURE phase so it runs before ProseMirror's own
  * keymap: otherwise Enter inserts a paragraph break and the arrow keys move the
  * cursor instead of the highlight.
- *
- * The `@` and `/` menus cannot both be open — `@` needs a boundary character
- * before it and `/` only fires at the start of a block — so checking the
- * mention menu first resolves a stray overlap one way rather than acting on
- * both.
  */
 export function createMentionKeydownHandler(
   menu: MentionMenuController,
   host: MentionKeymapHost
 ): (event: KeyboardEvent) => void {
   return function onKeydownCapture(event: KeyboardEvent): void {
-    if (!menu.state.open) return
+    // An IME composing text owns Enter and the arrows until it commits.
+    if (!menu.state.open || event.isComposing) return
     switch (event.key) {
       case 'ArrowDown':
         event.preventDefault()
@@ -54,25 +50,29 @@ export function createMentionKeydownHandler(
         break
       case 'Enter':
       case 'Tab': {
+        // A search still running answers the query on screen; the rows showing
+        // may belong to an older one. Wait for it (spec 6.7). If it settles with
+        // nothing to pick, the key is spent: it was prevented before the answer
+        // was known, so a waiting Enter does not split the paragraph.
+        if (menu.pending()) {
+          event.preventDefault()
+          menu.whenSettled(host.commit)
+          break
+        }
+        // Nothing to pick: the key keeps its ordinary meaning, so Enter still
+        // starts a new paragraph and `@xyz` stays as text (spec 7.2).
         const choice = menu.current()
         if (!choice) return
         event.preventDefault()
-        host.commit(choice as MentionChoice)
-        break
-      }
-      case 'Backspace': {
-        // The query is read from the LIVE document rather than from
-        // `menu.state.query`, which lags one tick behind it. See
-        // `shouldClearScopeOnBackspace`.
-        if (!shouldClearScopeOnBackspace(host.queryText(), menu.state.selectedType !== null)) {
-          return
-        }
-        event.preventDefault()
-        menu.clearType()
+        host.commit(choice)
         break
       }
       case 'Escape':
+        // Stopped as well as prevented: the app's global shortcut handler
+        // blurs the editor on Escape, and a blur releases the `@`, so editing
+        // the query could no longer bring the menu back (spec 8.1).
         event.preventDefault()
+        event.stopPropagation()
         host.dismiss(menu.state.query)
         break
       default:

@@ -14,17 +14,19 @@
  */
 
 /** The longest query accepted before the menu gives up and closes. */
-const MAX_QUERY_LENGTH = 64
+export const MAX_QUERY_LENGTH = 64
 
 /**
  * Characters that end a mention query.
  *
- * A space ends it because entity IDs and the titles searched against them are
- * single-token, and because leaving the menu open across a space would make it
- * fire on ordinary prose containing an `@`. Backticks end it because they open
- * a code span, where a mention is not what the user means.
+ * A space ends it: a query is one token, with `-` as the word separator
+ * (TKT-39TIB4), and leaving the menu open across a space would make it fire on
+ * ordinary prose containing an `@`. Backticks end it because they open a code
+ * span, where a mention is not what the user means. U+FFFC is what
+ * ProseMirror's `textBetween` writes for an inline atom such as an existing
+ * reference, which is not part of a query either.
  */
-const TERMINATORS = /[\s`]/
+export const TERMINATORS = /[\s`\uFFFC]/
 
 export interface MentionQuery {
   /** The text typed after the `@`, possibly empty right after the trigger. */
@@ -45,6 +47,18 @@ export interface MentionQuery {
  * Nil: accepts undefined for `textBefore`, since `getContent` returns undefined
  * when the cursor is not somewhere a mention makes sense.
  */
+
+/**
+ * A character after which an `@` is not a trigger: a word character, as in an
+ * email address or a handle, or a backtick that opens a code span.
+ */
+const NO_TRIGGER_AFTER = /[\p{L}\p{N}_`]/u
+
+/** True when an `@` typed right after `prev` starts a mention. */
+export function triggersAfter(prev: string): boolean {
+  return !NO_TRIGGER_AFTER.test(prev)
+}
+
 export function parseMentionQuery(textBefore: string | undefined): MentionQuery | null {
   if (!textBefore) return null
 
@@ -55,41 +69,8 @@ export function parseMentionQuery(textBefore: string | undefined): MentionQuery 
   if (query.length > MAX_QUERY_LENGTH) return null
   if (TERMINATORS.test(query)) return null
 
-  // An `@` immediately after a word character is an email address or a handle,
-  // not a mention trigger. Requiring a boundary before it keeps the menu out
-  // of the way when someone types an address into prose.
-  if (at > 0) {
-    const before = textBefore[at - 1] ?? ''
-    if (!/[\s([\]{}>,;:"']/.test(before)) return null
-  }
+  // A denylist, not an allowlist, so `“@`, `/@` or `(@` still open the menu.
+  if (at > 0 && !triggersAfter(textBefore[at - 1] ?? '')) return null
 
   return { query, matchLength: query.length + 1 }
-}
-
-/**
- * Whether Backspace should clear the mention menu's type scope instead of
- * deleting a character.
- *
- * True only when a scope is set AND the query is already empty. With characters
- * left to delete it must be false, or the user could never backspace through
- * their own query.
- *
- * `textBefore` must be read from the LIVE document at the moment the key is
- * handled, not from the menu's `query` state. That state is written by the slash
- * provider's `shouldShow`, which runs on ProseMirror's update cycle — i.e. after
- * the capture-phase key handler — so on the keystroke that empties the query it
- * is one character stale. Trusting it let the `@` trigger itself be deleted: the
- * menu then closed, and closing resets the scope, which looked exactly like the
- * chip clearing correctly while the trigger was actually lost.
- *
- * Nil: accepts undefined for `textBefore` (see [parseMentionQuery]) and reports
- * false, since no active query means no scope to clear.
- */
-export function shouldClearScopeOnBackspace(
-  textBefore: string | undefined,
-  hasScope: boolean
-): boolean {
-  if (!hasScope) return false
-  const live = parseMentionQuery(textBefore)
-  return live !== null && live.query.length === 0
 }

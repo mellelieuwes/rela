@@ -11,9 +11,10 @@
  * correctly straight away, rather than showing a bare id until the next
  * mentions refresh — which would not contain the new id anyway.
  */
+import { closeHistory } from '@milkdown/kit/prose/history'
 import { TextSelection } from '@milkdown/kit/prose/state'
 import type { EditorView } from '@milkdown/kit/prose/view'
-import { isValidEntityRefId } from './entityRefNode'
+import { isValidEntityRefId } from './entityRefId'
 
 export interface EntityRefInsert {
   id: string
@@ -49,12 +50,25 @@ export function replaceWithEntityRef(
 
   const tr = state.tr.replaceWith(from, to, node)
   // A space after the reference, so typing on does not get absorbed into the
-  // node. The node is one position wide, hence from + 1 and from + 2.
-  tr.insertText(' ', from + 1)
-  tr.setSelection(TextSelection.create(tr.doc, from + 2))
+  // node — unless a space or punctuation already follows, where one more would
+  // leave `see [Title] .` (TKT-39TIB4, spec 6.3). The node is one position
+  // wide, hence from + 1.
+  const next = tr.doc.textBetween(from + 1, Math.min(from + 2, tr.doc.resolve(from + 1).end()))
+  let after = from + 1
+  if (!FOLLOWS_WITHOUT_SPACE.test(next)) {
+    tr.insertText(' ', after)
+    after += 1
+  }
+  tr.setSelection(TextSelection.create(tr.doc, after))
+  // Its own undo step: undo brings back the typed `@query` rather than
+  // removing the query together with the reference.
+  closeHistory(tr)
   view.dispatch(tr)
   return true
 }
+
+/** A character after which an inserted reference needs no space of its own. */
+const FOLLOWS_WITHOUT_SPACE = /^[\s.,;:!?)\]}'"]/
 
 /** Inserts at the cursor, replacing any selection. */
 export function insertEntityRefAtCursor(view: EditorView, ref: EntityRefInsert): boolean {
@@ -62,22 +76,36 @@ export function insertEntityRefAtCursor(view: EditorView, ref: EntityRefInsert):
   return replaceWithEntityRef(view, ref, from, to)
 }
 
-/**
- * Replaces the `@query` span before the cursor.
- *
- * `matchLength` covers the trigger and the query together, so the `@abc` the
- * user typed does not survive alongside the node it produced. A non-positive
- * length means there is no live query, and replacing would eat whatever
- * happened to precede the cursor — refused rather than guessed.
- */
+/** A document range: the armed `@` token, per `mentionArm.armedToken`. */
+export interface TokenRange {
+  from: number
+  to: number
+}
+
+/** Replaces the `@query` token with an entity reference. */
 export function replaceMentionQueryWithRef(
   view: EditorView,
   ref: EntityRefInsert,
-  matchLength: number
+  range: TokenRange
 ): boolean {
-  if (matchLength <= 0) return false
-  const { $from } = view.state.selection
-  const to = $from.pos
-  const from = Math.max($from.start(), to - matchLength)
-  return replaceWithEntityRef(view, ref, from, to)
+  return replaceWithEntityRef(view, ref, range.from, range.to)
+}
+
+/**
+ * Replaces the query after the `@` with `text`, keeping the `@`.
+ *
+ * Used to write a chosen type scope: `@ti` becomes `@ticket:`. The characters
+ * typed to find the type are consumed, not kept as a search (spec 4.1). The
+ * cursor lands at the end, so the menu goes on reading the new query.
+ */
+export function replaceMentionQueryWithText(
+  view: EditorView,
+  text: string,
+  range: TokenRange
+): boolean {
+  const start = range.from + 1
+  const tr = view.state.tr.insertText(text, start, range.to)
+  tr.setSelection(TextSelection.create(tr.doc, start + text.length))
+  view.dispatch(tr)
+  return true
 }

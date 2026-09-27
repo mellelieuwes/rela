@@ -400,10 +400,11 @@ hyphenated query into words was measured to destroy ID ranking on the bleve
 backend (the regression BUG-O09QUC exists to prevent) and to match nothing at all
 on the linear and postgres backends, which match the query as one substring.
 Keeping it a single token is also what makes `@status:open` inert rather than
-filter syntax. Cross-field reach comes from the **type picker**, which scopes via
-the `type` parameter `searchEntities` already takes — the type is a filter, never
-part of the scored haystack, and a picked name is always one the schema supplied
-(so `?type=` stays an allowlist).
+filter syntax. The one thing removed is a type scope (`@ticket:fa` searches `fa`),
+which travels as the `type` parameter `searchEntities` already takes: the type is
+a filter, never part of the scored haystack, and the scope resolves only to a name
+the schema supplied (so `?type=` stays an allowlist). An unknown `foo:` is plain
+query text.
 
 Four things in that file are load-bearing and each was a real defect first:
 
@@ -442,32 +443,53 @@ Four things in that file are load-bearing and each was a real defect first:
   fixture passes either way; if that test hangs rather than fails, that is the
   regression.
 
+**What the SPA menu shows is decided by `mentionPlan.ts`** (TKT-39TIB4): a
+starting list for a bare `@` (related entities, then recently viewed ones from
+`utils/recentEntities.ts`, then recently modified), types for one or two letters,
+types then results at three, results then types from four. The plan is pure and
+re-derived from the query on every keystroke; the controller keeps no scope of
+its own. The recently viewed list stores only IDs and reloads each through the
+read gate, so localStorage never holds a title.
+
+**Every read the menu makes goes through one world** (`mentionWorld.ts`): the
+world `worldForFace` names for the face being edited, else the page's
+`?world=`. The reference it writes is a bare id either way, so the world only
+decides what can be found and whose title a row shows. Starting lists are kept
+per world, because their caches hold rows resolved in one.
+
+**A type scope is document text, not menu state.** Choosing a type rewrites
+`@ti` to `@ticket:`; `mentionArm.ts` draws a chip over it as a decoration.
+Backspace over the `:` unscopes through ordinary editing, which is why the keymap
+has no Backspace case. An earlier design held the scope in memory and needed a
+Backspace handler that read a query mirror one tick behind the document; do not
+bring either back.
+
+**The menu opens only for a TYPED `@`.** `mentionArm.ts` records the position of
+an `@` that arrives through `handleTextInput` and follows it through edits. It
+lets go for good when the cursor leaves the token, a space ends it, the `@` is
+deleted, or the editor blurs. Paste, undo and cursor moves into old text never
+reach `handleTextInput`, so they cannot open the menu. Two consequences:
+
+- The keymap's Escape must `stopPropagation`: the global shortcut handler blurs
+  the focused input on Escape, and that blur would release the `@`.
+- `MilkdownEditor.vue` calls `mention.onKeydown` for EVERY key, before looking at
+  `menu.state.open`. SlashProvider updates on a debounce, so an Enter pressed
+  straight after typing can arrive before the menu has opened; the handler
+  re-reads the document first, then waits for the pending search (spec 6.7).
+
 **The highlight is an identity, never an index.** `MentionMenuState.highlight`
 holds `{kind:'type',name}` / `{kind:'entity',id}` / `null` and
 `highlightedIndex()` resolves it against the live rows on each read. The rows
-change asynchronously underneath it — type suggestions re-rank per keystroke and
-vanish past `TYPE_SECTION_MAX_QUERY`, entities arrive a debounce later — and a
-stored index was wrong four ways: it could point past the end (so `current()`
-returned null, the keymap fell through without `preventDefault`, and Enter put a
-paragraph break in the document), or slide onto an unrelated row when the list
-above it shrank (so Enter inserted an entity the user never highlighted). A
-changed scope also clears `items` and the highlight, so the chip cannot sit above
-rows from the previous scope. **Assert these before the debounce resolves**:
-`runSearch` resets the highlight on arrival, so any test that settles first
-cannot see this class of bug at all — which is exactly how it shipped past the
-first round of tests.
-
-**The menu's `query` mirror is one tick behind the document.** It is written by
-the slash provider's `shouldShow`, which runs on ProseMirror's update cycle —
-*after* the capture-phase key handler. A Backspace handler that reads
-`menu.state.query` therefore sees the pre-keystroke value and acts one character
-early; that let the `@` trigger itself be deleted while the menu closed and reset
-the scope, which looked exactly like the chip clearing correctly. Re-read the live
-document with `parseMentionQuery(slashProvider.getContent(view))` instead. This is
-only reproducible with back-to-back keystrokes in a real browser (any pause lets
-the mirror catch up, and jsdom has no update cycle), so the guard is the e2e test
-`Backspace at the start of the query clears the type scope` — don't demote it to a
-unit test.
+change asynchronously underneath it (type rows re-plan per keystroke, entities
+arrive a debounce later), and a stored index was wrong four ways: it could point
+past the end (so `current()` returned null, the keymap fell through without
+`preventDefault`, and Enter put a paragraph break in the document), or slide onto
+an unrelated row when the list above it shrank (so Enter inserted an entity the
+user never highlighted). A changed scope or stage also clears `items` and the
+highlight at once, so rows from the previous question cannot be picked. **Assert
+these before the debounce resolves**: `sync` drops an entity highlight that
+the arriving rows no longer contain, so a test that settles first cannot see
+this class of bug at all.
 
 The sandboxed app editor (`src/app-editor/`) deliberately stays on EasyMDE —
 see TKT-D2JML7 and the CSP note in `internal/dataentry/CLAUDE.md`.

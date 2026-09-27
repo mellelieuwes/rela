@@ -1,51 +1,39 @@
 /**
  * The `@` completion menu, as the SPA form consumes it.
  *
- * The old backtick flow made the user pick a type prefix first, then an entity,
- * because a backtick carries no information about what is wanted. `@` searches
- * every type at once, and this adds an *optional* type picker on top: types are
- * offered, never required. Picking one scopes the search through the `type`
- * parameter `searchEntities` already takes.
+ * What the menu shows for each query is decided by `planMention`
+ * (`mentionPlan.ts`, TKT-39TIB4): a starting list for a bare `@`, types for one
+ * or two letters, then search results with types beside them. A type scope is
+ * document text (`@ticket:`), so this controller keeps no scope of its own; it
+ * re-plans from the query on every keystroke.
  *
  * The search/staleness state machine lives in `mentionMenuState.ts` because the
- * sandboxed app editor runs the same menu without Vue, and a second copy of that
- * logic is exactly the drift TKT-D2JML7 removed. What stays here is the
- * reactivity, the axios transport, and the **type picker**, which is SPA-only:
+ * sandboxed app editor runs the same machine without Vue, and a second copy of
+ * that logic is exactly the drift TKT-D2JML7 removed. What stays here is the
+ * reactivity, the transports, the stages and the type rows, which are SPA-only:
  * the sandboxed app runs under `connect-src 'none'` and has no route to the
- * schema's type list, so giving it one is a separate decision (not made). The
- * fuzzy ranking DOES live in the shared `rankMentions.ts`, so both editors get
- * it. Nothing here touches ProseMirror.
+ * schema's type list. Nothing here touches ProseMirror.
  *
  * # The query reaches the server unmodified
  *
- * Nothing here rewrites, splits or sanitizes the query. Sending word-split forms
- * was measured to destroy ID ranking on the bleve backend (the regression
- * BUG-O09QUC exists to prevent) and to return nothing at all on the linear and
- * postgres backends, which match the query as one substring. Cross-field reach
- * comes from the type picker, not from rewriting what the user typed. It also
- * keeps the query a single token, so filter syntax such as `@status:open` stays
- * inert.
+ * Nothing here rewrites, splits or sanitizes the search text. Sending
+ * word-split forms was measured to destroy ID ranking on the bleve backend (the
+ * regression BUG-O09QUC exists to prevent) and to return nothing at all on the
+ * linear and postgres backends, which match the query as one substring. The
+ * only thing removed is a `ticket:` scope, which travels as the `type`
+ * parameter instead.
  */
 import { reactive, readonly, watch, type DeepReadonly } from 'vue'
-import { searchEntities } from '@/api'
+import { ApiError, getEntity, listRecentlyModified, searchEntities } from '@/api'
+import { useWorld } from '@/composables/useWorld'
 import { useSchemaStore } from '@/stores/schema'
 import type { Entity } from '@/types'
-import {
-  createMentionMenuMachine,
-  MIN_SEARCH_LEN,
-  type MentionMenuSnapshot,
-} from './mentionMenuState'
-import { rankTypeNames } from './rankMentions'
-
-/** Type suggestions shown alongside entity results once a search is running. */
-const MAX_TYPE_SUGGESTIONS = 3
-/**
- * Above this query length the types section is hidden entirely.
- *
- * A long query is a statement that the user is naming an entity, not browsing
- * for a type, and the types section costs a row of the menu either way.
- */
-const TYPE_SECTION_MAX_QUERY = 6
+import { listRecentEntities } from '@/utils/recentEntities'
+import { createMentionMenuMachine, type MentionMenuSnapshot } from './mentionMenuState'
+import { planMention, type MentionPlan, type MentionTypeInfo } from './mentionPlan'
+import { createStartingList, type StartingList, type StartingListSelf } from './mentionStartingList'
+import { mentionWorld } from './mentionWorld'
+import { rankMentions } from './rankMentions'
 
 /** What the highlight currently sits on. Enter means different things per kind. */
 export type MentionChoice = { kind: 'type'; name: string } | { kind: 'entity'; entity: Entity }
@@ -53,57 +41,50 @@ export type MentionChoice = { kind: 'type'; name: string } | { kind: 'entity'; e
 /**
  * WHAT the highlight is on, rather than where it sat.
  *
- * The rows are recomputed asynchronously under the user: the type suggestions
- * re-rank on every keystroke (and vanish past `TYPE_SECTION_MAX_QUERY`), while
- * the entities arrive a debounce later. A stored INDEX addressing that is
- * unsound, and was wrong four different ways — it could point past the end
- * (making Enter a no-op that fell through to ProseMirror and inserted a
- * paragraph break), or slide onto an unrelated row when the list above it
- * shrank, so Enter inserted an entity the user never highlighted.
+ * The rows are recomputed asynchronously under the user: the type rows re-plan
+ * on every keystroke, while the entities arrive a debounce later. A stored
+ * INDEX addressing that is unsound, and was wrong four different ways — it
+ * could point past the end (making Enter a no-op that fell through to
+ * ProseMirror and inserted a paragraph break), or slide onto an unrelated row
+ * when the list above it shrank, so Enter inserted an entity the user never
+ * highlighted.
  *
  * Storing the identity makes those unrepresentable: it either still resolves to
  * the same row or it does not resolve at all, and `highlightedIndex()` falls
  * back to the first row rather than inventing a selection.
  */
 export type MentionHighlight =
-  | { kind: 'type'; name: string }
-  | { kind: 'entity'; id: string }
-  | null
+  { kind: 'type'; name: string } | { kind: 'entity'; id: string } | null
 
-/**
- * The SPA menu's state: the shared snapshot plus the type-picker dimension.
- *
- * The extra fields live here rather than in `MentionMenuSnapshot` because the
- * app editor's menu has no type picker; widening the shared snapshot would make
- * every plain-DOM renderer carry fields it can never populate.
- */
+/** The SPA menu's state: the shared snapshot plus what the plan decided. */
 export interface MentionMenuState extends MentionMenuSnapshot<Entity> {
-  /** Type names offered for scoping, already ranked and capped. */
+  /** Type rows on offer, already ranked and capped. */
   typeItems: string[]
-  /** The type the search is scoped to, or null for every type. */
-  selectedType: string | null
-  /**
-   * The highlighted row's identity, or null to mean "the first row".
-   *
-   * Read `highlightedIndex()` for rendering; this is the source of truth. The
-   * shared snapshot's numeric `highlightedIndex` addresses the ENTITY list only
-   * and is left to the machine.
-   */
+  /** The type the query is scoped to, or null for every type. */
+  scopeType: string | null
+  /** True when the type rows come before the entity rows. */
+  typesFirst: boolean
+  /** True when the entity rows are the starting list rather than a search. */
+  starting: boolean
+  /** True when this query runs a search or loads the starting list. */
+  searches: boolean
+  /** The highlighted row's identity, or null to mean "the first row". */
   highlight: MentionHighlight
+  /**
+   * True while a search is debouncing or in flight. The rows on screen do not
+   * answer the current query yet, so an empty list must not read "No matches".
+   */
+  pending: boolean
 }
 
 export interface MentionMenuController {
   state: DeepReadonly<MentionMenuState>
-  /** The shortest query that triggers a search; below it the menu prompts. */
-  minQueryLength: number
   /** Opens the menu, or updates the query if it is already open. */
   setQuery: (query: string) => void
-  /** Scopes the search to a type and re-runs it against the current query. */
-  selectType: (name: string) => void
-  /** Removes the scope and re-runs the search across every type. */
-  clearType: () => void
-  /** Supplies the type names to offer; the caller owns the schema store. */
-  setAvailableTypes: (names: string[]) => void
+  /** Supplies the types to offer; the caller owns the schema store. */
+  setAvailableTypes: (types: MentionTypeInfo[]) => void
+  /** The type a `name:` prefix scopes to, or null when there is none. */
+  scopeTypeFor: (name: string) => string | null
   close: () => void
   moveHighlight: (delta: number) => void
   /** Highlights the row at this position in the combined list. */
@@ -118,41 +99,118 @@ export interface MentionMenuController {
   highlightedIndex: () => number
   /** What the highlight sits on, or null when there is nothing to pick. */
   current: () => MentionChoice | null
+  /** True while a search is debouncing or in flight. */
+  pending: () => boolean
+  /**
+   * Runs `cb` with the highlighted choice once the current search settles.
+   *
+   * Enter pressed before results land waits for them rather than acting on
+   * the rows of an older query (spec 6.7). Dropped if the query changes or the
+   * menu closes first, and not run when the search found nothing.
+   */
+  whenSettled: (cb: (choice: MentionChoice) => void) => void
+  /**
+   * True when a search settled with nothing to offer. An empty starting list
+   * does not count: nothing was searched for, so nothing failed to match.
+   */
+  settledEmpty: () => boolean
   dispose: () => void
 }
 
+/** How the controller fetches entities. Injected so tests need no network. */
+export interface MentionTransport {
+  search: (text: string, type: string | undefined, signal?: AbortSignal) => Promise<Entity[]>
+  startingList: StartingList
+}
+
+/** The entity being edited, which the starting list excludes and starts from. */
+export type MentionSelf = StartingListSelf
+
 /**
- * A mention menu with the type picker bound to the live schema.
+ * A mention menu wired to the live schema and the API.
  *
- * Separate from [useMentionMenu] so the composable itself stays free of store
- * context: its tests supply types through `setAvailableTypes` and need no Pinia
- * instance. This wrapper is what a component uses.
- *
- * The list is watched rather than read once because the schema loads on app
- * mount and an editor can mount before that resolves. Type names are not
+ * The type list is watched rather than read once because the schema loads on
+ * app mount and an editor can mount before that resolves. Type names are not
  * confidential (root CLAUDE.md: "The configuration is not a secret"), so every
  * principal is offered the full list and no per-principal filtering applies.
  */
-export function useSchemaMentionMenu(): MentionMenuController {
-  const menu = useMentionMenu()
+export function useSchemaMentionMenu(self: () => MentionSelf | null): MentionMenuController {
   const schemaStore = useSchemaStore()
+  const { worldParam } = useWorld()
+  const typeNames = (): string[] => schemaStore.entityTypeList.map(([name]) => name)
+  // Read per request, so a world switch applies to the next keystroke.
+  const world = (): string | undefined =>
+    mentionWorld(self(), schemaStore.worldForFace, worldParam.value)
+
+  // One starting list per world: its caches hold rows resolved in one world,
+  // and a row from another would show the wrong face's title, or an entity
+  // that world does not have.
+  const startingLists = new Map<string, StartingList>()
+  const startingListFor = (w: string | undefined): StartingList => {
+    const key = w ?? ''
+    let list = startingLists.get(key)
+    if (!list) {
+      list = createStartingListIn(w)
+      startingLists.set(key, list)
+    }
+    return list
+  }
+
+  function createStartingListIn(w: string | undefined): StartingList {
+    return createStartingList({
+      self,
+      related: async (s) => {
+        // The face being edited, by its address, so its own links are the
+        // ones offered; the neighbours resolve through `w`. `include=*`
+        // returns only neighbours the principal may read.
+        const address = s.face ? `${s.id}@${s.face}` : s.id
+        const entity = await getEntity(s.type, address, {
+          include: '*',
+          ...(w ? { world: w } : {}),
+        })
+        return Object.values(entity.included ?? {})
+      },
+      recent: listRecentEntities,
+      load: async (ref) => {
+        try {
+          return await getEntity(ref.type, ref.id, w ? { world: w } : undefined)
+        } catch (err) {
+          // Gone, renamed or hidden from this user: not offered. Any other
+          // failure is rethrown so the starting list retries it next time
+          // rather than caching a network blip as "hidden".
+          if (err instanceof ApiError && (err.status === 404 || err.status === 403)) return null
+          throw err
+        }
+      },
+      recentlyModified: async (types, limit) =>
+        (await listRecentlyModified(types, limit, undefined, w)).data,
+      allTypes: typeNames,
+    })
+  }
+
+  const menu = useMentionMenu({
+    search: async (text, type, signal) => (await searchEntities(text, type, signal, world())).data,
+    startingList: { load: (type) => startingListFor(world()).load(type) },
+  })
+
   watch(
-    () => schemaStore.entityTypeList.map(([name]) => name),
-    (names) => menu.setAvailableTypes(names),
+    () => schemaStore.entityTypeList,
+    (list) =>
+      menu.setAvailableTypes(
+        list.map(([name, def]) => ({
+          name,
+          prefixes: def.id_prefixes ?? (def.id_prefix ? [def.id_prefix] : []),
+        }))
+      ),
     { immediate: true }
   )
   return menu
 }
 
-/** True when two name lists are equal element-wise. */
-function sameNames(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((n, i) => n === b[i])
-}
-
-export function useMentionMenu(): MentionMenuController {
+export function useMentionMenu(transport: MentionTransport): MentionMenuController {
   // The machine mutates its snapshot in place, so wrapping it in `reactive`
   // makes every mutation reach the template without the machine knowing Vue
-  // exists. The type-picker fields are ours; the machine never touches them.
+  // exists. The plan fields are ours; the machine never touches them.
   const state = reactive<MentionMenuState>({
     open: false,
     query: '',
@@ -161,13 +219,19 @@ export function useMentionMenu(): MentionMenuController {
     loading: false,
     errorMsg: '',
     typeItems: [],
-    selectedType: null,
+    scopeType: null,
+    typesFirst: false,
+    starting: false,
+    searches: false,
     highlight: null,
+    pending: false,
   })
 
-  /** Every type name the schema knows, unranked. The allowlist for `?type=`. */
-  let availableTypes: string[] = []
+  let types: MentionTypeInfo[] = []
   let disposed = false
+  let settledCallback: ((choice: MentionChoice) => void) | null = null
+
+  const plan = (query: string): MentionPlan => planMention(types, query)
 
   // Project the machine's snapshot onto the reactive object. Assigning the
   // fields rather than swapping the object keeps a `readonly(state)` handle a
@@ -179,207 +243,192 @@ export function useMentionMenu(): MentionMenuController {
   // would show an empty list forever.
   const sync = (): void => {
     Object.assign(state, machine.state)
+    state.pending = machine.pending()
     // A fresh result set invalidates an entity highlight that is no longer in
     // it. The machine owns `items`, so this is the point where that is known.
     if (state.highlight?.kind === 'entity') {
       const id = state.highlight.id
       if (!state.items.some((e) => e.id === id)) state.highlight = null
     }
-    refreshTypeItems()
+    if (settledCallback && !machine.pending()) {
+      const cb = settledCallback
+      settledCallback = null
+      const choice = current()
+      if (choice) cb(choice)
+    }
   }
 
   const machine = createMentionMenuMachine<Entity>({
     // axios can cancel, so the signal is passed through and an abort is not
     // reported to the user as a failed search.
     abortable: true,
+    shouldSearch: (query) => {
+      const p = plan(query)
+      return p.starting || p.search !== null
+    },
     search: async (query, signal) => {
-      // `selectedType ?? undefined`: the API treats undefined as "every type",
-      // and a null would serialize into the query string. Read at call time so
-      // a scope change searches the new scope.
-      const resp = await searchEntities(query, state.selectedType ?? undefined, signal)
-      return resp.data
+      const p = plan(query)
+      if (p.starting) return transport.startingList.load(p.scopeType)
+      // `?? undefined`: the API treats undefined as "every type", and a null
+      // would serialize into the query string. The scope is always a name the
+      // schema supplied, so `?type=` stays an allowlist.
+      return transport.search(p.search ?? '', p.scopeType ?? undefined, signal)
+    },
+    // The starting list keeps its own order; a search is ranked against the
+    // text actually searched for, which under a scope excludes `ticket:`.
+    rank: (items, query) => {
+      const p = plan(query)
+      return p.starting ? items : rankMentions(items, p.search ?? '')
     },
     onChange: () => sync(),
   })
 
-  /**
-   * Recomputes the type suggestions for the current query.
-   *
-   * Hidden outright once a type is picked (the scope is shown as a chip instead,
-   * and offering a second type would suggest the two combine) or once the query
-   * grows past `TYPE_SECTION_MAX_QUERY`.
-   *
-   * Only a BARE `@` lists everything. One letter is already enough to narrow a
-   * couple of dozen types to a handful, so the type list is deliberately NOT
-   * tied to `MIN_SEARCH_LEN` — that threshold exists to stop a one-character
-   * ENTITY search reaching the server, which is a different concern.
-   */
-  function refreshTypeItems(): void {
-    // A closed menu offers nothing. Without this a schema reload repopulates the
-    // list behind a closed menu, making `close()` a liar and leaving a later
-    // `v-if` on typeItems.length able to pop the menu open by itself.
-    if (!state.open) {
-      state.typeItems = []
-      return
-    }
-    if (state.selectedType !== null || state.query.length > TYPE_SECTION_MAX_QUERY) {
-      state.typeItems = []
-      return
-    }
-    if (state.query.length === 0) {
-      state.typeItems = availableTypes
-      return
-    }
-    state.typeItems = rankTypeNames(availableTypes, state.query).slice(0, MAX_TYPE_SUGGESTIONS)
+  function applyPlan(p: MentionPlan): void {
+    state.scopeType = p.scopeType
+    state.typeItems = p.typeRows
+    state.typesFirst = p.typesFirst
+    state.starting = p.starting
+    state.searches = p.starting || p.search !== null
   }
 
   function setQuery(query: string): void {
     if (disposed) return
-    machine.setQuery(query)
-    // The machine's `onChange` covers the async transitions, but a query below
-    // the search minimum settles synchronously, so the type section is
-    // refreshed here as well as in `sync`.
+    // SlashProvider re-asks on every update, cursor blinks and focus changes
+    // included. Restarting the search for the same text would push its answer
+    // back each time, and hold up an Enter that is waiting for it.
+    if (state.open && query === state.query) return
+    settledCallback = null
+    const next = plan(query)
+    // Rows answering a different question are wrong, not merely stale: the
+    // previous scope's entities under a new scope, or search hits where the
+    // starting list belongs. Drop them rather than let Enter insert one.
+    const reset =
+      state.open && (next.scopeType !== state.scopeType || next.starting !== state.starting)
+    applyPlan(next)
+    machine.setQuery(query, reset)
+    if (reset) state.highlight = null
+    // The machine's `onChange` covers the async transitions; a query that
+    // does not search settles synchronously, so mirror the open state here.
     state.open = true
     state.query = query
-    refreshTypeItems()
   }
 
-  function selectType(name: string): void {
+  function setAvailableTypes(next: MentionTypeInfo[]): void {
     if (disposed) return
-    // Allowlist by construction: only a name the schema supplied can become a
-    // `?type=` value, never free-typed text.
-    if (!availableTypes.includes(name)) return
-    if (state.selectedType === name) return
-    state.selectedType = name
-    applyScopeChange()
-  }
-
-  function clearType(): void {
-    if (disposed) return
-    if (state.selectedType === null) return
-    state.selectedType = null
-    applyScopeChange()
-  }
-
-  /**
-   * Re-runs the search after the scope changed, dropping what the old scope
-   * answered.
-   *
-   * The rows on screen answered a different question, and the chip already
-   * claims the new scope — leaving them would show entities of the wrong type
-   * under a type's name, and an Enter in that window would insert one.
-   */
-  function applyScopeChange(): void {
-    // Re-issue the current query FIRST; the machine re-reads
-    // `state.selectedType` inside its `search` closure.
-    //
-    // Order matters. `machine.setQuery` calls back into `sync()`, which
-    // `Object.assign`s the machine's snapshot over ours — so clearing `items`
-    // before this call would be silently undone by that copy, leaving the old
-    // scope's rows under the new chip. The machine keeps its previous results
-    // until the debounced search resolves, so the clear has to land after.
-    machine.setQuery(state.query)
-    state.items = []
+    types = next
+    // A closed menu offers nothing. Without this a schema reload repopulates
+    // the rows behind a closed menu, making `close()` a liar.
+    if (!state.open) return
+    // Re-ask the open query from scratch: rows fetched under the old type
+    // list (a search where the plan now says "types only", or a starting
+    // list without its recently modified part) answer a different question.
+    applyPlan(plan(state.query))
+    machine.setQuery(state.query, true)
     state.highlight = null
-    refreshTypeItems()
   }
 
-  function setAvailableTypes(names: string[]): void {
-    if (disposed) return
-    if (sameNames(availableTypes, names)) return
-    availableTypes = names
-    // A schema reload can retire the scoped type; dropping the stale scope is
-    // safer than searching a type that no longer exists.
-    if (state.selectedType !== null && !names.includes(state.selectedType)) {
-      state.selectedType = null
-    }
-    refreshTypeItems()
+  /** Exact type names only; an ID prefix scopes without a colon, so `TKT-6:` gets no chip. */
+  function scopeTypeFor(name: string): string | null {
+    const lower = name.toLowerCase()
+    return types.find((t) => t.name.toLowerCase() === lower)?.name ?? null
   }
 
   function close(): void {
+    settledCallback = null
     machine.close()
     state.open = false
     state.typeItems = []
-    state.selectedType = null
+    state.scopeType = null
+    state.typesFirst = false
+    state.starting = false
+    state.searches = false
     state.highlight = null
   }
 
-  /** Total rows the highlight can address: types first, then entities. */
-  function choiceCount(): number {
-    return state.typeItems.length + state.items.length
+  /** The rows in display order, which depends on the stage. */
+  function rows(): MentionChoice[] {
+    const typeRows: MentionChoice[] = state.typeItems.map((name) => ({ kind: 'type', name }))
+    const entityRows: MentionChoice[] = state.items.map((e) => ({
+      kind: 'entity',
+      entity: e as Entity,
+    }))
+    return state.typesFirst ? [...typeRows, ...entityRows] : [...entityRows, ...typeRows]
   }
 
-  /** The row at `index` in the combined list, types first. */
-  function choiceAt(index: number): MentionChoice | null {
-    const typeCount = state.typeItems.length
-    if (index < 0) return null
-    if (index < typeCount) {
-      const name = state.typeItems[index]
-      return name === undefined ? null : { kind: 'type', name }
-    }
-    const entity = state.items[index - typeCount]
-    return entity === undefined ? null : { kind: 'entity', entity: entity as Entity }
-  }
-
-  /**
-   * Where the stored identity currently sits, or 0 when it no longer resolves.
-   *
-   * Resolving on read is what makes a changing list safe: a highlight whose row
-   * is gone falls back to the first row instead of addressing whatever moved
-   * into its old position.
-   */
   function highlightedIndex(): number {
-    const n = choiceCount()
-    if (n === 0) return -1
+    const all = rows()
+    if (all.length === 0) return -1
     const h = state.highlight
     if (h !== null) {
-      if (h.kind === 'type') {
-        const at = state.typeItems.indexOf(h.name)
-        if (at !== -1) return at
-      } else {
-        const at = state.items.findIndex((e) => e.id === h.id)
-        if (at !== -1) return state.typeItems.length + at
-      }
+      const at = all.findIndex((r) =>
+        r.kind === 'type'
+          ? h.kind === 'type' && r.name === h.name
+          : h.kind === 'entity' && r.entity.id === h.id
+      )
+      if (at !== -1) return at
     }
     return 0
   }
 
-  function moveHighlight(delta: number): void {
-    const n = choiceCount()
-    if (n === 0) return
-    setHighlight((highlightedIndex() + delta + n) % n)
-  }
-
   function setHighlight(index: number): void {
-    const choice = choiceAt(index)
-    if (choice === null) return
+    const choice = rows()[index]
+    if (!choice) return
     state.highlight =
       choice.kind === 'type'
         ? { kind: 'type', name: choice.name }
         : { kind: 'entity', id: choice.entity.id }
   }
 
+  function moveHighlight(delta: number): void {
+    const n = rows().length
+    if (n === 0) return
+    setHighlight((highlightedIndex() + delta + n) % n)
+  }
+
   function current(): MentionChoice | null {
-    return choiceAt(highlightedIndex())
+    return rows()[highlightedIndex()] ?? null
+  }
+
+  function whenSettled(cb: (choice: MentionChoice) => void): void {
+    if (!machine.pending()) {
+      const choice = current()
+      if (choice) cb(choice)
+      return
+    }
+    settledCallback = cb
+  }
+
+  function settledEmpty(): boolean {
+    return (
+      state.open &&
+      state.searches &&
+      !state.starting &&
+      !machine.pending() &&
+      state.errorMsg === '' &&
+      state.items.length === 0 &&
+      state.typeItems.length === 0
+    )
   }
 
   function dispose(): void {
     disposed = true
+    settledCallback = null
     machine.dispose()
   }
 
   return {
     state: readonly(state) as DeepReadonly<MentionMenuState>,
-    minQueryLength: MIN_SEARCH_LEN,
     setQuery,
-    selectType,
-    clearType,
     setAvailableTypes,
+    scopeTypeFor,
     close,
     moveHighlight,
     setHighlight,
     highlightedIndex,
     current,
+    pending: () => machine.pending(),
+    whenSettled,
+    settledEmpty,
     dispose,
   }
 }

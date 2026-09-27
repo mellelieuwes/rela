@@ -358,6 +358,15 @@
   display: none;
 }
 
+/* The `@ticket:` scope while the `@` menu owns it; a decoration from
+   `mentionArm.ts`, so the text underneath stays ordinary text. */
+.milkdown-editor-shell .mention-scope-chip {
+  padding: 0 var(--space-2xs);
+  border-radius: var(--radius-sm);
+  background: var(--hover-bg);
+  font-family: monospace;
+}
+
 /* `fixed`, unlike the mention anchor above, and deliberately so.
    `linkPanelPosition.ts` anchors this to the LINK's rect, which
    `posToDOMRect` gives in viewport coordinates. The shell is

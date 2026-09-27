@@ -41,7 +41,7 @@ import './milkdownEditor.css'
 
 import { RELA_COMMONMARK, RELA_OUTPUT_NODES, configureRelaSerializer } from './editorPreset'
 import { entityRefNode } from './entityRefNode'
-import { insertEntityRefAtCursor, replaceMentionQueryWithRef } from './insertEntityRef'
+import { insertEntityRefAtCursor } from './insertEntityRef'
 import { taskList } from './taskListItem'
 import {
   entityRefResolutionPlugin,
@@ -50,9 +50,8 @@ import {
   type ResolverHandle,
 } from './entityRefResolution'
 import { guardWriteBack, decideEmit } from './writeBackGuard'
-import { createMentionTrigger } from './mentionTrigger'
-import { useSchemaMentionMenu, type MentionChoice } from './useMentionMenu'
-import { createMentionKeydownHandler } from './mentionKeymap'
+import { useEditorMention } from './useEditorMention'
+import type { MentionSelf } from './useMentionMenu'
 import {
   INLINE_COMMANDS,
   BLOCK_COMMANDS,
@@ -79,8 +78,6 @@ import MentionMenu from './MentionMenu.vue'
 import EditorToolbar from './EditorToolbar.vue'
 import EntityPickerModal from '../EntityPickerModal.vue'
 import type { EntityRefResolver } from '@/utils/markdown'
-import type { Entity } from '@/types'
-import { entityDisplayTitle } from '@/utils/entityDisplay'
 import { useUIStore } from '@/stores/ui'
 
 const props = defineProps<{
@@ -94,6 +91,11 @@ const props = defineProps<{
    * as its bare ID, which is the correct degraded state rather than an error.
    */
   refResolver?: EntityRefResolver
+  /**
+   * The entity whose body this is, or absent for a new entity. The `@` menu
+   * starts from its related entities and never offers it to itself.
+   */
+  mentionSelf?: MentionSelf
 }>()
 
 const emit = defineEmits<{
@@ -108,8 +110,14 @@ const editor = shallowRef<Editor | null>(null)
 /** True while the document is empty, so the placeholder shows. */
 const isEmpty = ref(true)
 
-// Binds the type picker to the live schema; see `useSchemaMentionMenu`.
-const menu = useSchemaMentionMenu()
+// The `@` menu; see `useEditorMention`. `slashProvider` is assigned at mount,
+// so the host reads it lazily.
+const mention = useEditorMention(() => props.mentionSelf ?? null, {
+  view: () => currentView(),
+  textBefore: (view) => slashProvider?.getContent(view),
+  hide: () => slashProvider?.hide(),
+})
+const menu = mention.menu
 
 const showPlaceholder = computed(() => isEmpty.value)
 
@@ -147,12 +155,7 @@ const historyCommands = HISTORY_COMMANDS
 const showTableGroup = ref(false)
 
 /** Every command the toolbar can light up, probed together on each change. */
-const ALL_COMMANDS = [
-  ...INLINE_COMMANDS,
-  ...BLOCK_COMMANDS,
-  ...TABLE_COMMANDS,
-  ...HISTORY_COMMANDS,
-]
+const ALL_COMMANDS = [...INLINE_COMMANDS, ...BLOCK_COMMANDS, ...TABLE_COMMANDS, ...HISTORY_COMMANDS]
 
 const linkUI = useLinkUI()
 
@@ -248,19 +251,6 @@ let slashProvider: SlashProvider | null = null
 let cleanupLinkPanel: (() => void) | null = null
 let blockProvider: BlockProvider | null = null
 
-/**
- * Whether the `@` menu should be showing, and how wide its query is.
- *
- * Holds the Escape dismissal too: SlashProvider re-decides visibility on every
- * update, so closing the menu in the key handler alone did nothing — the query
- * still parsed and the menu came straight back.
- */
-const mentionTrigger = createMentionTrigger({
-  isOpen: () => menu.state.open,
-  close: () => menu.close(),
-  setQuery: (query) => menu.setQuery(query),
-})
-
 /** True when the document holds nothing a user has written. */
 function isDocEmpty(state: EditorState): boolean {
   const { doc } = state
@@ -346,30 +336,6 @@ function currentView(): EditorView | null {
   } catch {
     return null
   }
-}
-
-/**
- * Replaces the `@query` before the cursor with an entityRef node.
- *
- * The title the picker just displayed is carried onto the node so the
- * reference reads correctly straight away, without waiting for a mentions
- * refresh that will not include a just-inserted ID.
- */
-function insertRef(item: Entity): void {
-  const view = currentView()
-  if (!view) return
-  const inserted = replaceMentionQueryWithRef(
-    view,
-    {
-      id: item.id,
-      title: entityDisplayTitle(item) || '',
-      entityType: item.type ?? null,
-    },
-    mentionTrigger.matchLength()
-  )
-  if (!inserted) return
-  menu.close()
-  view.focus()
 }
 
 // The toolbar's entity-reference picker, kept from the editor this replaces.
@@ -462,65 +428,20 @@ function runCommand(cmd: EditorCommand): void {
   currentView()?.focus()
 }
 
-/**
- * Acts on a menu row: a type row scopes the search, an entity row inserts.
- *
- * Shared by click and by Enter/Tab so the two paths cannot diverge on what a
- * row means. Picking a type keeps the menu open — it narrows the search, it is
- * not the insertion, and the user still has to choose an entity.
- */
-function commitChoice(choice: MentionChoice): void {
-  if (choice.kind === 'entity') {
-    insertRef(choice.entity)
-    return
-  }
-  menu.selectType(choice.name)
-  currentView()?.focus()
-}
-
-function onMenuPick(index: number): void {
-  menu.setHighlight(index)
-  const choice = menu.current()
-  if (choice) commitChoice(choice)
-}
-
-function onMenuHover(index: number): void {
-  menu.setHighlight(index)
-}
-
-/**
- * Keyboard handling for whichever floating surface is open.
- *
- * Mention semantics live in `mentionKeymap.ts`; this supplies the three things
- * that need the editor itself, and handles the link panel's own Escape.
- * Bound in the capture phase on the wrapper.
- */
-const onMentionKeydown = createMentionKeydownHandler(menu, {
-  queryText: () => {
-    const view = currentView()
-    return view ? slashProvider?.getContent(view) : undefined
-  },
-  commit: commitChoice,
-  dismiss: (query) => {
-    mentionTrigger.dismiss(query)
-    menu.close()
-    slashProvider?.hide()
-  },
-})
-
 function onKeydownCapture(event: KeyboardEvent): void {
-  if (!menu.state.open) {
-    if (event.key === 'Escape' && linkUI.panelOpen.value) {
-      event.preventDefault()
-      // Remembering the dismissal is what makes this work at all. Simply
-      // hiding the panel would achieve nothing: its visibility is derived
-      // from the selection, and the caret is still in the link, so the next
-      // state change would show it again and Escape would look broken.
-      linkUI.dismiss()
-    }
-    return
+  // The mention handler goes first and unconditionally: it can open a menu the
+  // debounced slash update has not opened yet, so `menu.state.open` is only
+  // meaningful after it ran.
+  mention.onKeydown(event)
+  if (event.defaultPrevented || menu.state.open) return
+  if (event.key === 'Escape' && linkUI.panelOpen.value) {
+    event.preventDefault()
+    // Remembering the dismissal is what makes this work at all. Simply
+    // hiding the panel would achieve nothing: its visibility is derived
+    // from the selection, and the caret is still in the link, so the next
+    // state change would show it again and Escape would look broken.
+    linkUI.dismiss()
   }
-  onMentionKeydown(event)
 }
 
 onMounted(async () => {
@@ -600,7 +521,7 @@ onMounted(async () => {
             content: menuRoot.value as HTMLElement,
             trigger: '@',
             debounce: 0,
-            shouldShow: (view) => mentionTrigger.shouldShow(slashProvider?.getContent(view)),
+            shouldShow: (view) => mention.shouldShow(view),
           })
           return {
             update: (view, prevState) => slashProvider?.update(view, prevState),
@@ -623,6 +544,7 @@ onMounted(async () => {
     // so ordinary pasting is untouched.
     .use(linkPaste)
     .use(dirtyTracker)
+    .use(mention.plugin)
     .use(slash)
     // Drag/insert handle in the gutter, plus the drop cursor and gap cursor it
     // needs to be usable: without `cursor` a drag has no visible target, and
@@ -797,7 +719,7 @@ onBeforeUnmount(() => {
   // Close the picker before tearing the editor down so a late `select` cannot
   // fire against a destroyed view.
   pickerOpen.value = false
-  menu.dispose()
+  mention.dispose()
   slashProvider?.destroy()
   slashProvider = null
   cleanupLinkPanel?.()
@@ -865,10 +787,9 @@ onBeforeUnmount(() => {
     <div ref="menuRoot" class="mention-menu-anchor" data-show="false">
       <MentionMenu
         :state="menu.state"
-        :min-query-length="menu.minQueryLength"
         :highlighted-index="menu.highlightedIndex()"
-        @pick="onMenuPick"
-        @hover="onMenuHover"
+        @pick="mention.onPick"
+        @hover="mention.onHover"
       />
     </div>
 

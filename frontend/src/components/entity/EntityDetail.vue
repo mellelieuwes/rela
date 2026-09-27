@@ -9,13 +9,7 @@ import { fetchView, getCommands, getErrorMessage } from '@/api'
 import { useWorld, worldQuery, DEFAULT_WORLD } from '@/composables/useWorld'
 import { entityRef, refBareId, refFace } from '@/utils/entityRef'
 import { worldText, type WorldTextVars } from '@/utils/worldText'
-import type {
-  ViewEntity,
-  ViewResponse,
-  ViewSection,
-  ViewSectionField,
-  ViewTreeNode,
-} from '@/api'
+import type { ViewEntity, ViewResponse, ViewSection, ViewSectionField, ViewTreeNode } from '@/api'
 import type { Entity } from '@/types'
 import { entityDisplayTitle } from '@/utils/entityDisplay'
 import { useAutoSave } from '@/composables/useAutoSave'
@@ -83,6 +77,7 @@ import { useConfirm, withConfirmError } from '@/composables/useConfirm'
 import { useDelayedPending } from '@/composables/useDelayedPending'
 import { beginRouteLoad } from '@/composables/useNavigationPending'
 import { PENDING_TIMINGS } from '@/composables/pendingTimings'
+import { recordRecentEntity } from '@/utils/recentEntities'
 
 const props = withDefaults(
   defineProps<{
@@ -392,7 +387,7 @@ const checkboxStats = computed(() => {
 // Shared with the editor via makeRefResolver, so a reference shows the same
 // title whether it is being read or edited.
 const refResolver = computed<EntityRefResolver | undefined>(() =>
-  makeRefResolver(viewData.value?.mentions),
+  makeRefResolver(viewData.value?.mentions)
 )
 
 // Text-anchored comments as source ranges (TKT-FIO205 stage 2). Offsets are
@@ -439,6 +434,16 @@ watch(
     }
   },
   { flush: 'post' }
+)
+
+// Feeds the `@` menu's starting list (TKT-39TIB4). Only the address is kept;
+// the menu reloads it through the read gate before showing it.
+watch(
+  () => (entry.value ? `${entry.value.type}\u0000${entry.value.id}` : null),
+  () => {
+    if (entry.value?.type) recordRecentEntity(refBareId(entry.value.id), entry.value.type)
+  },
+  { immediate: true }
 )
 
 // Content-only useAutoSave instance. EntityDetail does not own a form
@@ -1002,9 +1007,7 @@ const noticeNote = computed<string>(() => {
 // on THIS reader's permission. Keeping that as one array literal is the point
 // — order is policy, and the template should not be where it is decided (nor
 // re-litigated when a third key arrives).
-const bannerNotes = computed<string[]>(() =>
-  [noticeNote.value, readOnlyNote.value].filter(Boolean)
-)
+const bannerNotes = computed<string[]>(() => [noticeNote.value, readOnlyNote.value].filter(Boolean))
 
 // The note for an entity with no face in this world, in the world's words.
 const absentNote = computed<string>(() => {
@@ -1608,9 +1611,7 @@ function sectionContainsEntity(sec: ViewSection, id: string): boolean {
 }
 
 function treeContainsEntity(nodes: ViewTreeNode[] | undefined, id: string): boolean {
-  return (nodes ?? []).some(
-    (n) => n.entity?.id === id || treeContainsEntity(n.children, id)
-  )
+  return (nodes ?? []).some((n) => n.entity?.id === id || treeContainsEntity(n.children, id))
 }
 </script>
 
@@ -2406,12 +2407,7 @@ function treeContainsEntity(nodes: ViewTreeNode[] | undefined, id: string): bool
                    exists to show, and the node budget already bounds how much
                    arrives. Native <details> keeps keyboard support,
                    find-in-page expansion and the right ARIA for free. -->
-              <details
-                v-for="node in section.tree"
-                :key="node.entity.id"
-                class="nested-node"
-                open
-              >
+              <details v-for="node in section.tree" :key="node.entity.id" class="nested-node" open>
                 <summary class="nested-row">
                   <ChevronRight class="nested-twisty" :size="18" aria-hidden="true" />
                   <!-- .stop so following the link does not ALSO toggle the

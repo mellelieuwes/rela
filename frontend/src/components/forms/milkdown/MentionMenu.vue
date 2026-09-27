@@ -23,7 +23,6 @@ const props = defineProps<{
    * call site is what a cast there was hiding.
    */
   state: DeepReadonly<MentionMenuState>
-  minQueryLength: number
   /**
    * Which combined-list row is highlighted, resolved by the controller.
    *
@@ -44,13 +43,12 @@ function titleOf(item: DeepReadonly<Entity>): string {
 }
 
 /**
- * The highlight addresses types and entities as one sequence, so an entity's
- * row index is offset by however many type rows precede it.
+ * The highlight addresses types and entities as one sequence, in the order the
+ * plan chose (`typesFirst`). Each section's row index is offset by however many
+ * rows of the other section precede it.
  */
-const typeCount = computed(() => props.state.typeItems.length)
-function entityIndex(idx: number): number {
-  return typeCount.value + idx
-}
+const typeOffset = computed(() => (props.state.typesFirst ? 0 : props.state.items.length))
+const entityOffset = computed(() => (props.state.typesFirst ? props.state.typeItems.length : 0))
 
 /**
  * A per-instance id prefix, so two editors on one page cannot mint the same
@@ -81,8 +79,30 @@ const activeOptionId = computed(() =>
   props.highlightedIndex >= 0 ? optionId(props.highlightedIndex) : undefined
 )
 
-/** True when the panel has nothing to show and a note should stand in. */
-const isEmpty = computed(() => props.state.typeItems.length === 0 && props.state.items.length === 0)
+/**
+ * The note standing in for entity rows, or '' when rows show.
+ *
+ * A query that runs no search but matches a type gets no note: the type rows
+ * are the whole answer.
+ */
+const entityNote = computed(() => {
+  const s = props.state
+  if (s.items.length > 0) return ''
+  // One letter matching no type: nothing is searched yet, but an empty box
+  // would look broken.
+  if (!s.searches) return s.typeItems.length === 0 ? 'Type to search' : ''
+  if (s.pending) return 'Searching…'
+  if (s.errorMsg) return s.errorMsg
+  return s.starting ? 'Type to search' : 'No matches'
+})
+
+/** Section order, as the plan decided; the DOM follows it so reading order does too. */
+const sections = computed(() =>
+  props.state.typesFirst ? (['types', 'entities'] as const) : (['entities', 'types'] as const)
+)
+
+/** Types sit in a compact row once search results lead (spec 3.6). */
+const compactTypes = computed(() => !props.state.typesFirst && props.state.items.length > 0)
 </script>
 
 <template>
@@ -93,85 +113,92 @@ const isEmpty = computed(() => props.state.typeItems.length === 0 && props.state
     :aria-activedescendant="activeOptionId"
     @mousedown.prevent
   >
-    <!-- The scope chip. Shown above everything, including while loading, so
-         the user can always see which type the results are drawn from. It is
-         menu state rather than document text, so clearing it writes nothing to
-         the editor. -->
-    <div v-if="props.state.selectedType" class="mention-menu-chip-row">
-      <span class="mention-menu-chip">{{ props.state.selectedType }}</span>
-      <span class="mention-menu-chip-hint">Backspace to clear</span>
+    <!-- The scope is document text (`@ticket:`) and is drawn as a chip there;
+         this row repeats it so the list says what it is drawn from. The hint
+         shows only while nothing follows the colon, where Backspace unscopes. -->
+    <div v-if="props.state.scopeType" class="mention-menu-chip-row">
+      <span class="mention-menu-chip">{{ props.state.scopeType }}</span>
+      <span v-if="props.state.starting" class="mention-menu-chip-hint">Backspace to clear</span>
     </div>
 
-    <!-- Types are ranked and rendered even while a search is in flight: they
-         come from the already-loaded schema, so blanking them behind the
-         spinner would make the section flicker on every keystroke. -->
-    <template v-if="props.state.typeItems.length > 0">
-      <div :id="`${uid}-types-label`" class="mention-menu-section">Types</div>
-      <ul
-        class="mention-menu-list"
-        role="group"
-        :aria-labelledby="`${uid}-types-label`"
-        data-section="types"
+    <template v-for="section in sections" :key="section">
+      <div
+        v-if="section === 'entities' && (entityNote || props.state.items.length > 0)"
+        class="mention-menu-block"
       >
-        <li
-          v-for="(name, idx) in props.state.typeItems"
-          :id="optionId(idx)"
-          :key="`type:${name}`"
-          class="mention-menu-item"
-          :class="{ 'is-highlighted': idx === props.highlightedIndex }"
-          role="option"
-          :aria-selected="idx === props.highlightedIndex"
-          @click="emit('pick', idx)"
-          @mousemove="emit('hover', idx)"
+        <div
+          v-if="props.state.typeItems.length > 0"
+          :id="`${uid}-entities-label`"
+          class="mention-menu-section"
         >
-          <span class="mention-menu-title">{{ name }}</span>
-          <span class="mention-menu-id">type</span>
-        </li>
-      </ul>
-    </template>
-
-    <div v-if="props.state.loading || props.state.errorMsg">
-      <div v-if="typeCount > 0" class="mention-menu-section">Entities</div>
-      <div v-if="props.state.loading" class="mention-menu-note">Searching…</div>
-      <div v-else class="mention-menu-note mention-menu-error">{{ props.state.errorMsg }}</div>
-    </div>
-    <div
-      v-else-if="props.state.query.length < props.minQueryLength && isEmpty"
-      class="mention-menu-note"
-    >
-      Type to search entities
-    </div>
-    <div v-else-if="isEmpty" class="mention-menu-note">No matches</div>
-    <template v-else-if="props.state.items.length > 0">
-      <div v-if="typeCount > 0" :id="`${uid}-entities-label`" class="mention-menu-section">
-        Entities
+          Entities
+        </div>
+        <div
+          v-if="entityNote"
+          class="mention-menu-note"
+          :class="{ 'mention-menu-error': props.state.errorMsg && !props.state.loading }"
+        >
+          {{ entityNote }}
+        </div>
+        <ul
+          v-else-if="props.state.items.length > 0"
+          class="mention-menu-list"
+          role="group"
+          :aria-labelledby="props.state.typeItems.length > 0 ? `${uid}-entities-label` : undefined"
+          :aria-label="props.state.typeItems.length > 0 ? undefined : 'Entities'"
+          data-section="entities"
+        >
+          <li
+            v-for="(item, idx) in props.state.items"
+            :id="optionId(entityOffset + idx)"
+            :key="`entity:${item.id}`"
+            class="mention-menu-item"
+            :class="{ 'is-highlighted': entityOffset + idx === props.highlightedIndex }"
+            role="option"
+            :aria-selected="entityOffset + idx === props.highlightedIndex"
+            @click="emit('pick', entityOffset + idx)"
+            @mousemove="emit('hover', entityOffset + idx)"
+          >
+            <span class="mention-menu-title">{{ titleOf(item) }}</span>
+            <!-- The ID is shown here and nowhere else. It disambiguates two
+                 entities with the same title, and it is the label the editor
+                 falls back to when a title never resolves. The rendered view
+                 deliberately shows the title alone. -->
+            <span class="mention-menu-id">{{ item.id }}</span>
+          </li>
+        </ul>
       </div>
-      <ul
-        class="mention-menu-list"
-        role="group"
-        :aria-labelledby="typeCount > 0 ? `${uid}-entities-label` : undefined"
-        :aria-label="typeCount > 0 ? undefined : 'Entities'"
-        data-section="entities"
+
+      <!-- Types come from the already-loaded schema, so they render while a
+           search is in flight rather than flickering behind the note. -->
+      <div
+        v-else-if="section === 'types' && props.state.typeItems.length > 0"
+        class="mention-menu-block"
       >
-        <li
-          v-for="(item, idx) in props.state.items"
-          :id="optionId(entityIndex(idx))"
-          :key="`entity:${item.id}:${idx}`"
-          class="mention-menu-item"
-          :class="{ 'is-highlighted': entityIndex(idx) === props.highlightedIndex }"
-          role="option"
-          :aria-selected="entityIndex(idx) === props.highlightedIndex"
-          @click="emit('pick', entityIndex(idx))"
-          @mousemove="emit('hover', entityIndex(idx))"
+        <div :id="`${uid}-types-label`" class="mention-menu-section">Types</div>
+        <ul
+          class="mention-menu-list"
+          :class="{ 'is-compact': compactTypes }"
+          role="group"
+          :aria-labelledby="`${uid}-types-label`"
+          data-section="types"
         >
-          <span class="mention-menu-title">{{ titleOf(item) }}</span>
-          <!-- The ID is shown here and nowhere else. It disambiguates two
-               entities with the same title, and it is the label the editor
-               falls back to when a title never resolves. The rendered view
-               deliberately shows the title alone. -->
-          <span class="mention-menu-id">{{ item.id }}</span>
-        </li>
-      </ul>
+          <li
+            v-for="(name, idx) in props.state.typeItems"
+            :id="optionId(typeOffset + idx)"
+            :key="`type:${name}`"
+            class="mention-menu-item"
+            :class="{ 'is-highlighted': typeOffset + idx === props.highlightedIndex }"
+            role="option"
+            :aria-selected="typeOffset + idx === props.highlightedIndex"
+            @click="emit('pick', typeOffset + idx)"
+            @mousemove="emit('hover', typeOffset + idx)"
+          >
+            <span class="mention-menu-title">{{ name }}</span>
+            <span v-if="!compactTypes" class="mention-menu-id">type</span>
+          </li>
+        </ul>
+      </div>
     </template>
   </div>
 </template>
@@ -207,6 +234,21 @@ const isEmpty = computed(() => props.state.typeItems.length === 0 && props.state
   cursor: pointer;
 }
 
+.mention-menu-list.is-compact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-md);
+}
+
+.mention-menu-list.is-compact .mention-menu-item {
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-sm);
+  background: var(--hover-bg);
+  font-family: monospace;
+  font-size: var(--font-size-sm);
+}
+
 .mention-menu-item.is-highlighted {
   background: var(--hover-bg);
 }
@@ -238,10 +280,10 @@ const isEmpty = computed(() => props.state.typeItems.length === 0 && props.state
   text-transform: uppercase;
 }
 
-.mention-menu-section:not(:first-child) {
+.mention-menu-block + .mention-menu-block {
   border-top: 1px solid var(--border-color);
   margin-top: var(--space-2xs);
-  padding-top: var(--space-xs);
+  padding-top: var(--space-2xs);
 }
 
 .mention-menu-chip-row {

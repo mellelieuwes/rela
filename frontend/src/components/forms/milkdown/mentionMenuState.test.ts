@@ -52,6 +52,18 @@ describe('createMentionMenuMachine', () => {
     expect(m.state.items.map((i) => i.id)).toEqual(['ZZ-1'])
   })
 
+  it('is pending while the search debounces, already when it notifies', async () => {
+    let pendingAtChange = false
+    const m = createMentionMenuMachine<{ id: string }>({
+      search: async () => [],
+      onChange: () => (pendingAtChange = m.pending()),
+    })
+    m.setQuery('TKT')
+    expect(pendingAtChange).toBe(true)
+    await settle()
+    expect(m.pending()).toBe(false)
+  })
+
   it('clears stale results when the query is backspaced below the minimum', async () => {
     const { m } = machineWith(async () => [{ id: 'TKT-ABC' }])
     m.setQuery('TKT')

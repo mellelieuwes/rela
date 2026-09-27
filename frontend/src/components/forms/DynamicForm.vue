@@ -7,7 +7,7 @@ import { isCancelledFetch } from '@/composables/usePageData'
 import { readReturnTo } from '@/utils/returnPath'
 import { useWorld, DEFAULT_WORLD } from '@/composables/useWorld'
 import { actionAllowed } from '@/utils/affordancesWarning'
-import { entityRef, refFace } from '@/utils/entityRef'
+import { entityRef, refBareId, refFace } from '@/utils/entityRef'
 import { worldText } from '@/utils/worldText'
 import { entityDisplayTitle } from '@/utils/entityDisplay'
 import {
@@ -338,6 +338,17 @@ const entityType = computed(() => {
 })
 
 const isEdit = computed(() => !!props.entityId)
+
+/** The entity whose body the editor holds; the `@` menu starts from it. */
+const mentionSelf = computed(() =>
+  props.entityId && formConfig.value
+    ? {
+        id: refBareId(props.entityId),
+        type: formConfig.value.entity,
+        face: refFace(props.entityId),
+      }
+    : undefined
+)
 const formMode = computed(() => (isEdit.value ? 'edit' : 'create') as 'create' | 'edit')
 
 const idControls = useEntityIDControls(entityType, formMode)
@@ -2682,6 +2693,7 @@ defineExpose({
             ref="markdownEditorRef"
             :model-value="content"
             :ref-resolver="refResolver"
+            :mention-self="mentionSelf"
             placeholder="Markdown content..."
             @update:model-value="updateContent"
           />

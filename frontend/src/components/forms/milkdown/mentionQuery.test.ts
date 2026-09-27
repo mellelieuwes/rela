@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseMentionQuery, shouldClearScopeOnBackspace } from './mentionQuery'
+import { parseMentionQuery } from './mentionQuery'
 
 describe('parseMentionQuery', () => {
   it('opens on a bare @ at the start of a paragraph', () => {
@@ -22,6 +22,12 @@ describe('parseMentionQuery', () => {
 
   it('closes inside a code span', () => {
     expect(parseMentionQuery('`@TKT')).toBeNull()
+  })
+
+  it('fires after punctuation that is not part of a word', () => {
+    for (const before of ['“', '/', '(', '-']) {
+      expect(parseMentionQuery(`${before}@tk`)).toEqual({ query: 'tk', matchLength: 3 })
+    }
   })
 
   it('does not fire on an email address', () => {
@@ -50,33 +56,5 @@ describe('parseMentionQuery', () => {
   it('gives up on an over-long query rather than searching for it', () => {
     expect(parseMentionQuery('@' + 'x'.repeat(65))).toBeNull()
     expect(parseMentionQuery('@' + 'x'.repeat(64))).not.toBeNull()
-  })
-})
-
-describe('shouldClearScopeOnBackspace', () => {
-  it('is false without a scope, whatever the query', () => {
-    expect(shouldClearScopeOnBackspace('see @', false)).toBe(false)
-    expect(shouldClearScopeOnBackspace('see @abc', false)).toBe(false)
-  })
-
-  it('is true with a scope and an empty query', () => {
-    expect(shouldClearScopeOnBackspace('see @', true)).toBe(true)
-  })
-
-  it('is false while the query still has characters to delete', () => {
-    expect(shouldClearScopeOnBackspace('see @a', true)).toBe(false)
-    expect(shouldClearScopeOnBackspace('see @abc', true)).toBe(false)
-  })
-
-  it('is false when there is no active mention at the cursor', () => {
-    expect(shouldClearScopeOnBackspace(undefined, true)).toBe(false)
-    expect(shouldClearScopeOnBackspace('', true)).toBe(false)
-    expect(shouldClearScopeOnBackspace('no trigger here', true)).toBe(false)
-    // A space terminates the query, so this is no longer an active mention.
-    expect(shouldClearScopeOnBackspace('see @ ', true)).toBe(false)
-  })
-
-  it('is true for a bare @ at the very start of a paragraph', () => {
-    expect(shouldClearScopeOnBackspace('@', true)).toBe(true)
   })
 })

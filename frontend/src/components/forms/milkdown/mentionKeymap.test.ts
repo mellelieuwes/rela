@@ -3,10 +3,14 @@ import { createMentionKeydownHandler, type MentionKeymapHost } from './mentionKe
 import type { MentionChoice, MentionMenuController, MentionMenuState } from './useMentionMenu'
 
 /** A controller stub exposing only what the keymap touches. */
-function menuStub(state: Partial<MentionMenuState>, choice: MentionChoice | null = null) {
+function menuStub(
+  state: Partial<MentionMenuState>,
+  choice: MentionChoice | null = null,
+  pending = false
+) {
   const calls = {
     moveHighlight: vi.fn(),
-    clearType: vi.fn(),
+    whenSettled: vi.fn(),
     close: vi.fn(),
   }
   const menuState: MentionMenuState = {
@@ -18,40 +22,59 @@ function menuStub(state: Partial<MentionMenuState>, choice: MentionChoice | null
     // inherited type.
     highlightedIndex: 0,
     typeItems: [],
-    selectedType: null,
+    scopeType: null,
+    typesFirst: true,
+    starting: false,
+    searches: false,
     highlight: null,
     loading: false,
+    pending,
     errorMsg: '',
     ...state,
   }
   const menu = {
     state: menuState,
     current: () => choice,
+    pending: () => pending,
     ...calls,
   } as unknown as MentionMenuController
   return { menu, calls }
 }
 
-function hostStub(queryText: string | undefined): {
+function hostStub(): {
   host: MentionKeymapHost
   commit: ReturnType<typeof vi.fn>
   dismiss: ReturnType<typeof vi.fn>
 } {
   const commit = vi.fn()
   const dismiss = vi.fn()
-  return { host: { queryText: () => queryText, commit, dismiss }, commit, dismiss }
+  return { host: { commit, dismiss }, commit, dismiss }
 }
 
-function keyEvent(key: string): KeyboardEvent & { preventDefault: ReturnType<typeof vi.fn> } {
-  return { key, preventDefault: vi.fn() } as unknown as KeyboardEvent & {
-    preventDefault: ReturnType<typeof vi.fn>
-  }
+type KeyEventStub = KeyboardEvent & {
+  preventDefault: ReturnType<typeof vi.fn>
+  stopPropagation: ReturnType<typeof vi.fn>
+}
+
+function keyEvent(key: string): KeyEventStub {
+  return { key, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as KeyEventStub
 }
 
 describe('createMentionKeydownHandler', () => {
+  it.each(['Enter', 'ArrowDown', 'Escape'])('leaves %s to an IME that is composing', (key) => {
+    const { menu, calls } = menuStub({}, { kind: 'type', name: 'ticket' })
+    const host = { commit: vi.fn(), dismiss: vi.fn() }
+    const event = new KeyboardEvent('keydown', { key, isComposing: true, cancelable: true })
+    createMentionKeydownHandler(menu, host)(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(host.commit).not.toHaveBeenCalled()
+    expect(host.dismiss).not.toHaveBeenCalled()
+    expect(calls.moveHighlight).not.toHaveBeenCalled()
+  })
+
   it('ignores every key while the menu is closed', () => {
     const { menu, calls } = menuStub({ open: false })
-    const { host, commit } = hostStub('@')
+    const { host, commit } = hostStub()
     const handler = createMentionKeydownHandler(menu, host)
     for (const key of ['ArrowDown', 'Enter', 'Backspace', 'Escape']) {
       const ev = keyEvent(key)
@@ -64,7 +87,7 @@ describe('createMentionKeydownHandler', () => {
 
   it('moves the highlight on the arrow keys', () => {
     const { menu, calls } = menuStub({})
-    const { host } = hostStub('@')
+    const { host } = hostStub()
     const handler = createMentionKeydownHandler(menu, host)
 
     const down = keyEvent('ArrowDown')
@@ -79,7 +102,7 @@ describe('createMentionKeydownHandler', () => {
   it.each(['Enter', 'Tab'])('commits the highlighted choice on %s', (key) => {
     const choice: MentionChoice = { kind: 'type', name: 'ticket' }
     const { menu } = menuStub({}, choice)
-    const { host, commit } = hostStub('@')
+    const { host, commit } = hostStub()
     const ev = keyEvent(key)
     createMentionKeydownHandler(menu, host)(ev)
     expect(ev.preventDefault).toHaveBeenCalled()
@@ -88,7 +111,7 @@ describe('createMentionKeydownHandler', () => {
 
   it('lets Enter through when there is nothing highlighted', () => {
     const { menu } = menuStub({}, null)
-    const { host, commit } = hostStub('@')
+    const { host, commit } = hostStub()
     const ev = keyEvent('Enter')
     createMentionKeydownHandler(menu, host)(ev)
     // Not prevented: with no row to pick, Enter must stay a paragraph break.
@@ -98,69 +121,36 @@ describe('createMentionKeydownHandler', () => {
 
   it('dismisses on Escape, carrying the query so the menu stays shut', () => {
     const { menu } = menuStub({ query: 'tkt' })
-    const { host, dismiss } = hostStub('@tkt')
+    const { host, dismiss } = hostStub()
     const ev = keyEvent('Escape')
     createMentionKeydownHandler(menu, host)(ev)
     expect(ev.preventDefault).toHaveBeenCalled()
+    // The global shortcut handler would otherwise blur the editor.
+    expect(ev.stopPropagation).toHaveBeenCalled()
     expect(dismiss).toHaveBeenCalledWith('tkt')
   })
 
-  describe('Backspace', () => {
-    it('clears the scope when the live query is already empty', () => {
-      const { menu, calls } = menuStub({ selectedType: 'ticket' })
-      const { host } = hostStub('see @')
-      const ev = keyEvent('Backspace')
-      createMentionKeydownHandler(menu, host)(ev)
-      // Prevented, so the `@` trigger survives and the menu stays open.
-      expect(ev.preventDefault).toHaveBeenCalled()
-      expect(calls.clearType).toHaveBeenCalled()
-    })
+  it.each(['Enter', 'Tab'])('waits for a pending search on %s, then commits', (key) => {
+    const { menu, calls } = menuStub({}, { kind: 'type', name: 'ticket' }, true)
+    const { host, commit } = hostStub()
+    const ev = keyEvent(key)
+    createMentionKeydownHandler(menu, host)(ev)
+    expect(ev.preventDefault).toHaveBeenCalled()
+    expect(commit).not.toHaveBeenCalled()
+    expect(calls.whenSettled).toHaveBeenCalledWith(commit)
+  })
 
-    it('deletes text instead while the query still has characters', () => {
-      const { menu, calls } = menuStub({ selectedType: 'ticket' })
-      const { host } = hostStub('see @f')
-      const ev = keyEvent('Backspace')
-      createMentionKeydownHandler(menu, host)(ev)
-      expect(ev.preventDefault).not.toHaveBeenCalled()
-      expect(calls.clearType).not.toHaveBeenCalled()
-    })
-
-    it('does nothing special with no scope set', () => {
-      const { menu, calls } = menuStub({ selectedType: null })
-      const { host } = hostStub('see @')
-      const ev = keyEvent('Backspace')
-      createMentionKeydownHandler(menu, host)(ev)
-      expect(ev.preventDefault).not.toHaveBeenCalled()
-      expect(calls.clearType).not.toHaveBeenCalled()
-    })
-
-    // The regression this guards: reading `menu.state.query` instead of the
-    // live document. That mirror lags one ProseMirror tick, so on the keystroke
-    // that empties the query it still holds the previous character. A handler
-    // trusting it fires one keystroke late and the `@` gets deleted.
-    it('uses the live document, not the menu state mirror', () => {
-      // Mirror says 'f' (stale); the document says the query is already empty.
-      const { menu, calls } = menuStub({ selectedType: 'ticket', query: 'f' })
-      const { host } = hostStub('see @')
-      const ev = keyEvent('Backspace')
-      createMentionKeydownHandler(menu, host)(ev)
-      expect(calls.clearType).toHaveBeenCalled()
-      expect(ev.preventDefault).toHaveBeenCalled()
-    })
-
-    it('does not clear when the cursor is outside a mention', () => {
-      const { menu, calls } = menuStub({ selectedType: 'ticket' })
-      const { host } = hostStub(undefined)
-      const ev = keyEvent('Backspace')
-      createMentionKeydownHandler(menu, host)(ev)
-      expect(ev.preventDefault).not.toHaveBeenCalled()
-      expect(calls.clearType).not.toHaveBeenCalled()
-    })
+  it('leaves Backspace to the editor', () => {
+    const { menu } = menuStub({ query: 'ticket:' })
+    const { host } = hostStub()
+    const ev = keyEvent('Backspace')
+    createMentionKeydownHandler(menu, host)(ev)
+    expect(ev.preventDefault).not.toHaveBeenCalled()
   })
 
   it('leaves an unrelated key alone', () => {
     const { menu, calls } = menuStub({})
-    const { host, commit } = hostStub('@')
+    const { host, commit } = hostStub()
     const ev = keyEvent('a')
     createMentionKeydownHandler(menu, host)(ev)
     expect(ev.preventDefault).not.toHaveBeenCalled()
