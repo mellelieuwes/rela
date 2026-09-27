@@ -91,6 +91,8 @@ function getIcon(type: string): string {
 .toast-message {
   flex: 1;
   font-size: 14px;
+  /* Server messages can be multi-line (a config reload lists one error per line). */
+  white-space: pre-line;
 }
 
 /* Only the dismiss control takes pointer events back. Re-enabling them on

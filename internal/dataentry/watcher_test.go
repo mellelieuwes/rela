@@ -2,8 +2,11 @@ package dataentry
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/appbuild/appbuildtest"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
+	"github.com/Sourcehaven-BV/rela/internal/migration"
 	"github.com/Sourcehaven-BV/rela/internal/project"
 	"github.com/Sourcehaven-BV/rela/internal/storage"
 )
@@ -29,6 +33,8 @@ entities:
         required: true
       status:
         type: string
+      due:
+        type: date
 relations:
   depends_on:
     label: depends on
@@ -62,9 +68,16 @@ navigation:
 // setupReloadTestApp creates an App backed by MemFS for testing reload and broker logic.
 func setupReloadTestApp(t *testing.T) (*App, *storage.MemFS) {
 	t.Helper()
+	return setupReloadTestAppAt(t, "/project")
+}
+
+// setupReloadTestAppAt is setupReloadTestApp with the project rooted at root.
+// Script existence checks read the real disk through os.OpenRoot, so tests
+// that exercise them pass a t.TempDir() and put scripts there.
+func setupReloadTestAppAt(t *testing.T, root string) (*App, *storage.MemFS) {
+	t.Helper()
 
 	fs := storage.NewMemFS()
-	root := "/project"
 
 	ctx := &project.Context{
 		Root:                 root,
@@ -241,7 +254,7 @@ func TestEventBrokerConcurrency(t *testing.T) {
 }
 
 // simulateReload mimics what the data-entry.yaml subscriber does in
-// production: a config-path event triggers rebuildState(config). Other
+// production: a config-path event triggers reloadConfig. Other
 // event paths are ignored — entity/relation changes are reconciled by
 // the store's own observer chain (see [App.StartWatching]), not via a
 // dataentry-level callback.
@@ -249,7 +262,7 @@ func (a *App) simulateReload(events []storage.ChangeEvent) {
 	configPath := a.paths.Root + "/" + ConfigFile
 	for _, e := range events {
 		if e.Path == configPath {
-			a.rebuildState(true, false)
+			_ = a.reloadConfig() // callers assert on the published config
 			return
 		}
 	}
@@ -285,23 +298,271 @@ navigation: []
 	}
 }
 
-func TestReloadBadConfigKeepsPrevious(t *testing.T) {
-	app, fs := setupReloadTestApp(t)
-
-	originalName := app.Cfg().App.Name
-	configPath := app.paths.Root + "/" + ConfigFile
-
-	// Write invalid YAML config
-	_ = fs.WriteFile(configPath, []byte(`not: valid: yaml: {{{`), 0o644)
-
-	app.simulateReload([]storage.ChangeEvent{
-		{Path: configPath, Op: storage.OpModify},
-	})
-
-	// Config should be unchanged
-	if app.Cfg().App.Name != originalName {
-		t.Errorf("expected config to remain unchanged, got %q", app.Cfg().App.Name)
+// TestReloadRejectedConfigKeepsPrevious pins TKT-IMBOK: a reload runs the
+// same checks as startup, and a config startup would refuse leaves the
+// previous one serving instead of being published.
+func TestReloadRejectedConfigKeepsPrevious(t *testing.T) {
+	const header = "version: \"1.0\"\napp:\n  name: \"Rejected App\"\n"
+	tests := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{
+			name:    "unparsable yaml",
+			config:  "not: valid: yaml: {{{",
+			wantErr: "parsing data-entry.yaml",
+		},
+		{
+			name: "document with both command and script",
+			config: header + `documents:
+  report:
+    title: Report
+    command: ["echo", "hi"]
+    script: report.lua
+`,
+			wantErr: "invalid data-entry.yaml",
+		},
+		{
+			name: "missing action script",
+			config: header + `actions:
+  close:
+    label: Close
+    entity_types: [ticket]
+    script: missing.lua
+`,
+			wantErr: `action "close"`,
+		},
+		{
+			name: "missing document script",
+			config: header + `documents:
+  report:
+    title: Report
+    script: missing.lua
+`,
+			wantErr: `document "report"`,
+		},
+		{
+			name: "missing export_render script",
+			config: header + `lists:
+  tickets:
+    entity_type: ticket
+    title: Tickets
+    export_render: missing.lua
+    columns:
+      - property: title
+        label: Title
+`,
+			wantErr: `list "tickets": export_render`,
+		},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, dir := range []string{"actions", "scripts"} {
+				if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			app, fs := setupReloadTestAppAt(t, root)
+			before := app.Cfg()
+			_ = fs.WriteFile(filepath.Join(root, ConfigFile), []byte(tc.config), 0o644)
+
+			err := app.reloadConfig()
+
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("reloadConfig error = %v, want one containing %q", err, tc.wantErr)
+			}
+			if app.Cfg() != before {
+				t.Errorf("rejected reload replaced the config: app name now %q", app.Cfg().App.Name)
+			}
+		})
+	}
+}
+
+// TestReloadAcceptsExistingScripts is the positive counterpart: the same
+// shapes with their scripts present reload cleanly.
+func TestReloadAcceptsExistingScripts(t *testing.T) {
+	root := t.TempDir()
+	for dir, file := range map[string]string{"actions": "close.lua", "scripts": "report.lua"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, dir, file), []byte("return nil\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app, fs := setupReloadTestAppAt(t, root)
+	_ = fs.WriteFile(filepath.Join(root, ConfigFile), []byte(`version: "1.0"
+app:
+  name: "Scripted App"
+actions:
+  close:
+    label: Close
+    entity_types: [ticket]
+    script: close.lua
+documents:
+  report:
+    title: Report
+    script: report.lua
+`), 0o644)
+
+	if err := app.reloadConfig(); err != nil {
+		t.Fatalf("reloadConfig: %v", err)
+	}
+	if got := app.Cfg().App.Name; got != "Scripted App" {
+		t.Errorf("app name = %q, want %q", got, "Scripted App")
+	}
+}
+
+// TestReloadNormalizesCalendars pins that a reloaded config gets the same
+// defaults startup fills in; the old reload path skipped normalization.
+func TestReloadNormalizesCalendars(t *testing.T) {
+	app, fs := setupReloadTestApp(t)
+	_ = fs.WriteFile(app.paths.Root+"/"+ConfigFile, []byte(`version: "1.0"
+app:
+  name: "Calendar App"
+calendars:
+  schedule:
+    title: Schedule
+    sources:
+      - entity_type: ticket
+        date: due
+`), 0o644)
+
+	if err := app.reloadConfig(); err != nil {
+		t.Fatalf("reloadConfig: %v", err)
+	}
+	if got := app.Cfg().Calendars["schedule"].DefaultView; got == "" {
+		t.Error("reloaded calendar has no default_view; normalization did not run")
+	}
+}
+
+// TestReloadConfigBroadcasts pins the SSE contract of reloadConfig: refresh after an accepted reload, config-error (and no refresh)
+// after a rejected one.
+func TestReloadConfigBroadcasts(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    string
+		remove    bool
+		wantEvent string
+		wantData  string
+	}{
+		{
+			name:      "accepted",
+			config:    testReloadConfigYAML,
+			wantEvent: "refresh",
+			wantData:  "refresh",
+		},
+		{
+			name:      "rejected",
+			config:    "not: valid: yaml: {{{",
+			wantEvent: "config-error",
+			wantData:  `"error":"parsing data-entry.yaml`,
+		},
+		{
+			name:      "unreadable",
+			remove:    true,
+			wantEvent: "config-error",
+			wantData:  `"error":"` + configReadFailedMessage + `"`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			app, fs := setupReloadTestApp(t)
+			path := app.paths.Root + "/" + ConfigFile
+			if tc.remove {
+				_ = fs.Remove(path)
+			} else {
+				_ = fs.WriteFile(path, []byte(tc.config), 0o644)
+			}
+			ch := app.broker.subscribe()
+			defer app.broker.unsubscribe(ch)
+
+			_ = app.reloadConfig() // the broadcast is what this test checks
+
+			select {
+			case ev := <-ch:
+				if ev.Name != tc.wantEvent {
+					t.Fatalf("event = %q, want %q", ev.Name, tc.wantEvent)
+				}
+				if !strings.Contains(ev.Data, tc.wantData) {
+					t.Errorf("event data = %s, want it to contain %s", ev.Data, tc.wantData)
+				}
+			default:
+				t.Fatal("no event broadcast")
+			}
+			select {
+			case ev := <-ch:
+				t.Errorf("unexpected second event %q", ev.Name)
+			default:
+			}
+		})
+	}
+}
+
+// TestReloadConfigErrorOmitsHostPath pins that a rejected reload never puts
+// the project directory on the SSE wire. The deprecated-syntax error names its
+// file by absolute path, so it is the case that would leak without the rewrite.
+func TestReloadConfigErrorOmitsHostPath(t *testing.T) {
+	root := t.TempDir()
+	app, fs := setupReloadTestAppAt(t, root)
+	_ = fs.WriteFile(filepath.Join(root, ConfigFile), []byte(`version: "1.0"
+app:
+  name: "Deprecated"
+lists:
+  tickets:
+    entity_type: ticket
+    detail_view: ticket_detail
+`), 0o644)
+	if len(migration.DetectBytes(mustReadFile(t, fs, filepath.Join(root, ConfigFile)), migration.FileTypeDataEntry)) == 0 {
+		t.Fatal("fixture no longer triggers a deprecated-syntax detection; pick another")
+	}
+	ch := app.broker.subscribe()
+	defer app.broker.unsubscribe(ch)
+
+	if err := app.reloadConfig(); err == nil {
+		t.Fatal("reloadConfig accepted deprecated syntax")
+	}
+
+	var ev sseEvent
+	select {
+	case ev = <-ch:
+	default:
+		t.Fatal("no event broadcast")
+	}
+	if ev.Name != "config-error" {
+		t.Fatalf("event = %q, want config-error", ev.Name)
+	}
+	if strings.Contains(ev.Data, root) {
+		t.Errorf("config-error frame carries the project root %q: %s", root, ev.Data)
+	}
+	if !strings.Contains(ev.Data, "deprecated syntax") {
+		t.Errorf("config-error frame lost the reason: %s", ev.Data)
+	}
+}
+
+func TestPublicConfigErrorMessage_StripsRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	err := fmt.Errorf("open %s: permission denied", filepath.Join(root, "actions", "x.lua"))
+
+	got := publicConfigErrorMessage(err, root)
+
+	if strings.Contains(got, root) {
+		t.Errorf("message still carries the root: %q", got)
+	}
+	if want := "open " + filepath.Join("actions", "x.lua") + ": permission denied"; got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+}
+
+func mustReadFile(t *testing.T, fs *storage.MemFS, path string) []byte {
+	t.Helper()
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 // --- handleSSE tests ---
@@ -544,8 +805,12 @@ func TestConcurrentReadDuringOnReload(t *testing.T) {
 			}
 			// Hammer the actual reload path (config-driven rebuild)
 			// concurrently with reader goroutines so torn snapshots
-			// would be observable.
-			app.rebuildState(true, false)
+			// would be observable. A rejected reload publishes nothing,
+			// which would make this test vacuous, so fail on one.
+			if err := app.reloadConfig(); err != nil {
+				t.Errorf("reloadConfig: %v", err)
+				return
+			}
 		}
 	})
 

@@ -4,7 +4,8 @@ type: ticket
 title: Hot-reload of data-entry.yaml should re-run ValidateConfig + script existence checks
 kind: refactor
 priority: low
-status: backlog
+effort: s
+status: done
 ---
 
 ## Problem

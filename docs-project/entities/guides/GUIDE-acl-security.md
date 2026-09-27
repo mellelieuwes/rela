@@ -729,6 +729,29 @@ fan-out channel — putting audit attribution on it would leak the
 principal-to-entity topology to anyone connected. With per-type gating
 the feed now carries even less (just a type a connection may read).
 
+**Config-error frames go to every connection (TKT-IMBOK).** When a hot reload
+of `data-entry.yaml` fails its checks, the server keeps the previous config and
+sends a `config-error` frame to every connection. The frame is
+`{"file": "data-entry.yaml", "error": "<message>"}`. The message is the
+validation error. It can name lists, views, forms, actions, documents, script
+paths, entity types and properties. The host path of the project directory is
+removed before the frame is sent (`publicConfigErrorMessage`). When the file
+cannot be read at all, the frame carries only a fixed "cannot read" message,
+and the details go to the server log.
+
+The frame is not gated per principal, and not limited to administrators. This
+is deliberate. The configuration is not a secret: the metamodel is served by
+`/api/v1/_schema` and the navigation config by `/api/v1/_config`, to every
+principal, and the files usually live in a repository. See "Sidebar menu
+structure is principal-independent" below, which records this decision. A
+config-error frame names the same kind of operator-authored config, so gating
+it would protect nothing.
+
+The frame never carries entity content or entity ids from the data. The checks
+read only `data-entry.yaml`, the schema and the script files; they never read
+the store. The only values a message can quote are ones an operator wrote into
+`data-entry.yaml` itself, such as a literal in a `where:` filter.
+
 A regression test in `internal/dataentry/sse_audit_isolation_test.go`
 pins the audit invariant; `internal/dataentry/sse_acl_test.go` pins the
 per-type gating. Future work that adds new SSE event types must

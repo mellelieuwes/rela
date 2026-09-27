@@ -194,6 +194,27 @@ navigation:                # Sidebar menu (supports groups)
         list: all_tasks
 ```
 
+### Reloading the file while the server runs
+
+The server watches `data-entry.yaml` and reloads it when the file changes. A
+reload runs the same checks as startup. The file must parse and pass validation
+against the schema. Every `script:` it names for an action, a document or an
+`export_render` override must exist.
+
+If a check fails, the server rejects the reload and keeps serving the previous
+config. It logs the error and sends it to open browsers, which show it as an
+error message. Fix the file and save it again. The first save that passes the
+checks is applied.
+
+Some settings are read only at startup. A reload accepts changes to them, but
+they take effect only after a restart:
+
+- the `git:` block;
+- `app.name` and `app.description` where they form the OpenAPI title and
+  description;
+- on the PostgreSQL backend, the derived indexes for static dashboard and
+  next-action queries.
+
 ## App
 
 Display metadata shown in the header:
@@ -5306,7 +5327,9 @@ covered in the **User defaults** section earlier in this guide.
 
 Editing `data-entry.yaml` to change a document's `script:` or `command:`
 takes effect on the next request; open document panels pick up the new
-renderer on their next reload.
+renderer on their next reload. A reload that fails its checks, for example
+because the new `script:` does not exist, keeps the previous config. See
+"Reloading the file while the server runs".
 
 ## Calendar feeds
 

@@ -1,6 +1,6 @@
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useQueryCache } from '@pinia/colada'
-import { useGitStore, useEntitiesStore } from '@/stores'
+import { useGitStore, useEntitiesStore, useUIStore } from '@/stores'
 import { entityKeys } from '@/queries/entities'
 
 export type SSEEventType = 'refresh' | 'git' | 'git:status' | 'entity:changed'
@@ -17,6 +17,15 @@ export type SSEEventType = 'refresh' | 'git' | 'git:status' | 'entity:changed'
  */
 export interface EntityEventData {
   type: string
+}
+
+/**
+ * Payload of a `config-error` SSE event: a data-entry.yaml reload was rejected
+ * and the server keeps serving the previous config (TKT-IMBOK).
+ */
+export interface ConfigErrorData {
+  file: string
+  error: string
 }
 
 export interface SSEConnectionState {
@@ -55,6 +64,8 @@ const eventHandlers: Map<SSEEventType, Set<EventHandler>> = new Map()
  *
  * Events:
  * - refresh: Files changed, full reload needed
+ * - config-error: A config reload was rejected (data: {file, error}); the
+ *   previous config is still in use, so the page state stays valid.
  * - git / git:status: Git status changed
  * - entity:changed: Entities of a type changed (data: {type}); create, update,
  *   and delete all collapse to this — the client invalidates by type and
@@ -63,12 +74,16 @@ const eventHandlers: Map<SSEEventType, Set<EventHandler>> = new Map()
 export function useEvents() {
   const gitStore = useGitStore()
   const entitiesStore = useEntitiesStore()
+  const uiStore = useUIStore()
   const queryCache = useQueryCache()
 
   /* v8 ignore start - reconnection logic tested via e2e */
   function getReconnectDelay(): number {
     // Exponential backoff: 1s, 2s, 4s, 8s, ... up to 30s
-    const delay = Math.min(BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY)
+    const delay = Math.min(
+      BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts),
+      MAX_RECONNECT_DELAY
+    )
     return delay
   }
   /* v8 ignore stop */
@@ -126,6 +141,23 @@ export function useEvents() {
         // config-derived state (the sidebar) can refetch it. No type: the
         // event is not about one.
         eventHandlers.get('refresh')?.forEach((handler) => handler({ type: '' }))
+      })
+
+      // A rejected config reload. Nothing to invalidate: the server kept the
+      // previous config, so tell the user why their edit did not apply.
+      eventSource.addEventListener('config-error', (event: MessageEvent) => {
+        let detail = ''
+        try {
+          const data = JSON.parse(event.data) as Partial<ConfigErrorData>
+          if (typeof data.error === 'string') {
+            detail = typeof data.file === 'string' ? `${data.file}: ${data.error}` : data.error
+          }
+        } catch {
+          console.warn('Failed to parse config-error event data')
+        }
+        uiStore.error(
+          `Configuration not reloaded; the previous version is still in use.${detail ? ` ${detail}` : ''}`
+        )
       })
 
       // Handle git events

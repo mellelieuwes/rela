@@ -7,6 +7,7 @@ import { useEvents, type SSEConnectionState } from './useEvents'
 // Mock stores
 const mockGitFetchStatus = vi.fn().mockResolvedValue(undefined)
 const mockEntitiesInvalidateAll = vi.fn()
+const mockUIError = vi.fn()
 
 vi.mock('@/stores', () => ({
   useGitStore: () => ({
@@ -14,6 +15,9 @@ vi.mock('@/stores', () => ({
   }),
   useEntitiesStore: () => ({
     invalidateAll: mockEntitiesInvalidateAll,
+  }),
+  useUIStore: () => ({
+    error: mockUIError,
   }),
 }))
 
@@ -93,7 +97,11 @@ describe('useEvents', () => {
     const wrapper = mount(TestComponent)
     await nextTick()
 
-    const { connectionState: state, connect, disconnect } = wrapper.vm as unknown as {
+    const {
+      connectionState: state,
+      connect,
+      disconnect,
+    } = wrapper.vm as unknown as {
       connectionState: { value: SSEConnectionState }
       connect: () => void
       disconnect: () => void
@@ -222,6 +230,38 @@ describe('useEvents', () => {
       lastSource!._emit('refresh')
 
       expect(handler).toHaveBeenCalledTimes(1)
+    })
+
+    it('shows a rejected config reload as an error without invalidating', async () => {
+      const queryCache = useQueryCache()
+      const spy = vi.spyOn(queryCache, 'invalidateQueries')
+      await mountConnected()
+
+      lastSource!._emit(
+        'config-error',
+        JSON.stringify({
+          file: 'data-entry.yaml',
+          error: 'invalid data-entry.yaml: action "close": script not found',
+        })
+      )
+
+      expect(mockUIError).toHaveBeenCalledTimes(1)
+      expect(mockUIError.mock.calls[0][0]).toContain('previous version is still in use')
+      expect(mockUIError.mock.calls[0][0]).toContain(
+        'data-entry.yaml: invalid data-entry.yaml: action "close"'
+      )
+      expect(spy).not.toHaveBeenCalled()
+      expect(mockEntitiesInvalidateAll).not.toHaveBeenCalled()
+    })
+
+    it('still reports a config-error whose payload does not parse', async () => {
+      await mountConnected()
+
+      lastSource!._emit('config-error', 'not json')
+
+      expect(mockUIError).toHaveBeenCalledWith(
+        'Configuration not reloaded; the previous version is still in use.'
+      )
     })
   })
 

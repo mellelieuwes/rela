@@ -3,17 +3,19 @@ package dataentry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/Sourcehaven-BV/rela/internal/acl"
 	"github.com/Sourcehaven-BV/rela/internal/config"
+	"github.com/Sourcehaven-BV/rela/internal/migration"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 	"github.com/Sourcehaven-BV/rela/internal/store"
 )
@@ -30,7 +32,7 @@ type storeWatcher interface {
 //
 // Two shapes flow through the broker:
 //
-//   - Non-entity events (refresh, git, git:status): Name + Data are the
+//   - Non-entity events (refresh, config-error, git, git:status): Name + Data are the
 //     pre-rendered wire frame, delivered to every subscriber unchanged.
 //     They carry no entity identity, so there is nothing to gate.
 //   - Entity events (create/update/delete): EntityType is set and Name
@@ -50,7 +52,7 @@ type storeWatcher interface {
 // per-type verdicts so the next entity event re-resolves against
 // current membership (RR-K2WKEJ).
 type sseEvent struct {
-	Name           string // non-entity frame type ("refresh", "git", "git:status"); empty for entity/relation events
+	Name           string // non-entity frame type ("refresh", "config-error", "git", "git:status"); empty for entity/relation events
 	Data           string // pre-rendered JSON for non-entity frames
 	EntityType     string // set for entity create/update/delete events; gated per-connection
 	RelationChange bool   // set for relation writes; invalidates cached verdicts, never written to the wire
@@ -116,6 +118,14 @@ func (b *eventBroker) broadcastRelationChange() {
 	b.broadcastEvent(sseEvent{RelationChange: true})
 }
 
+// broadcastConfigError tells subscribers that a data-entry.yaml reload was
+// rejected and the previous config is still serving. The frame carries the
+// file name and the error's public message, never a host path.
+func (b *eventBroker) broadcastConfigError(ce *configError) {
+	data, _ := json.Marshal(map[string]string{"file": ConfigFile, "error": ce.public})
+	b.broadcastEvent(sseEvent{Name: "config-error", Data: string(data)})
+}
+
 // broadcastGitStatus sends a git status update event.
 func (b *eventBroker) broadcastGitStatus() {
 	b.broadcastEvent(sseEvent{Name: "git:status", Data: "{}"})
@@ -149,8 +159,8 @@ func (a *App) StartWatching() error {
 	// (1) data-entry.yaml subscription.
 	if sub, ok := a.cfgLoader.(config.Subscriber); ok {
 		stop, err := sub.Subscribe(context.Background(), ConfigFile, func() {
-			a.rebuildState(true, false)
-			a.broker.broadcast("refresh")
+			// A rejection is already logged and broadcast; nothing more to do.
+			_ = a.reloadConfig()
 		})
 		if err != nil {
 			return err
@@ -281,53 +291,95 @@ func (a *App) StartGitFetch() (stop func()) {
 	// coverage-ignore-end
 }
 
-// rebuildState re-reads changed inputs and publishes a fresh Schema snapshot
-// atomically. Readers observe either the pre-reload or the post-reload
-// snapshot, never a torn state.
-func (a *App) rebuildState(configChanged, metaChanged bool) {
-	current := a.State()
-	if current == nil {
-		return
+// configReadFailedMessage is the config-error text sent when data-entry.yaml
+// cannot be read at all. The loader's own error is logged but kept off the
+// wire because it can carry the host path of the project directory.
+const configReadFailedMessage = "cannot read " + ConfigFile + "; see the server log"
+
+// configError is a rejected data-entry.yaml reload. It carries the message
+// safe to show to a browser separately from the error that is logged.
+type configError struct {
+	public string
+	err    error
+}
+
+func (e *configError) Error() string { return e.err.Error() }
+func (e *configError) Unwrap() error { return e.err }
+
+// publicConfigErrorMessage renders a [loadConfig] error for the config-error
+// frame. The text describes operator-authored config, which is not a secret,
+// but it must not carry the host path of the project directory. The
+// deprecated-syntax error names its file by absolute path, so it is re-rendered
+// with the bare file name. Any other message is stripped of the project root as
+// a backstop, so a future error source cannot put the path on the wire either.
+func publicConfigErrorMessage(err error, root string) string {
+	var migErr *migration.Error
+	if errors.As(err, &migErr) {
+		safe := *migErr
+		safe.FilePath = ConfigFile
+		return safe.Error()
+	}
+	msg := err.Error()
+	if root = filepath.Clean(root); root != string(filepath.Separator) && root != "." {
+		msg = strings.ReplaceAll(msg, root+string(filepath.Separator), "")
+	}
+	return msg
+}
+
+// reloadConfig re-reads data-entry.yaml, publishes a fresh Schema snapshot
+// atomically, and tells browsers to refresh. Readers observe either the
+// pre-reload or the post-reload snapshot, never a torn state.
+//
+// The file goes through [loadConfig], the same pipeline as startup. When it
+// fails, nothing is published and the previous config keeps serving:
+// swapping in a config startup would refuse turns a typo into HTTP 500s at
+// first use (TKT-IMBOK). Browsers get a config-error frame instead of a
+// refresh, and the returned error is a *configError.
+func (a *App) reloadConfig() error {
+	a.reloadMu.Lock()
+	defer a.reloadMu.Unlock()
+	if a.State() == nil {
+		return nil
 	}
 
-	newCfg := current.Cfg
-	if configChanged {
-		cfgData, err := a.cfgLoader.Load(context.Background(), ConfigFile)
-		if err != nil {
-			slog.Warn("config reload error", "error", err)
-		} else {
-			var cfg Config
-			if unmarshalErr := yaml.Unmarshal(cfgData, &cfg); unmarshalErr != nil {
-				slog.Warn("config parse error", "error", unmarshalErr)
-			} else {
-				newCfg = &cfg
-				slog.Info("config reloaded")
-			}
-		}
+	reject := func(ce *configError) error {
+		slog.Warn("config reload rejected; keeping previous config", "error", ce.err)
+		a.broker.broadcastConfigError(ce)
+		return ce
 	}
 
-	newMeta := a.Meta()
+	meta := a.Meta()
+	cfgData, err := a.cfgLoader.Load(context.Background(), ConfigFile)
+	if err != nil {
+		return reject(&configError{public: configReadFailedMessage, err: err})
+	}
+	cfg, err := loadConfig(cfgData, meta, a.paths.Root)
+	if err != nil {
+		return reject(&configError{public: publicConfigErrorMessage(err, a.paths.Root), err: err})
+	}
+	slog.Info("config reloaded")
 
 	// The provider recomputes the style map + OpenAPI generator (co-derived
-	// from cfg/meta) when either changed, and publishes atomically.
-	derive := configChanged || metaChanged
-	a.schema.Reload(newCfg, newMeta, derive)
+	// from cfg/meta) and publishes atomically.
+	a.schema.Reload(cfg, meta, true)
 
-	if derive {
-		// Re-resolve the palette against the new project palette. The service
-		// keeps the previous user override if the on-disk file is broken —
-		// better to show stale colors than crash or wipe.
-		if err := a.palette.Reresolve(newCfg.Palette); err != nil {
-			slog.Warn("watcher: keeping previous user palette",
-				"file", userPaletteFile, "error", err)
-		}
+	// Re-resolve the palette against the new project palette. The service
+	// keeps the previous user override if the on-disk file is broken —
+	// better to show stale colors than crash or wipe.
+	if err := a.palette.Reresolve(cfg.Palette); err != nil {
+		slog.Warn("watcher: keeping previous user palette",
+			"file", userPaletteFile, "error", err)
 	}
+	a.broker.broadcast("refresh")
+	return nil
 }
 
 // handleSSE serves Server-Sent Events for live-reload notifications.
 // Connected browsers receive events when project files change or entities
 // are modified. Event types on the wire:
 //   - refresh: Files changed, reload needed
+//   - config-error: a data-entry.yaml reload was rejected; the previous
+//     config keeps serving. Data is {"file": ..., "error": ...}
 //   - git / git:status: Git status changed (git:status carries empty JSON)
 //   - entity:changed: Entities of a type changed; data is {"type": "..."}
 //     with NO id. Create/update/delete all collapse to this single
