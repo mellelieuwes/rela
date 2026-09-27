@@ -912,6 +912,12 @@ function createNew() {
   background: #4f46e5;
 }
 
+/* The board renders the list's FilterBar, whose bottom border separates the
+   filters from a list's table. A board has no table to separate from. */
+.filter-bar {
+  border-bottom: none;
+}
+
 .truncation-banner {
   padding: 10px 16px;
   margin-bottom: 16px;
