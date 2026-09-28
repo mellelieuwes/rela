@@ -337,41 +337,46 @@ func (svc analyzeService) analyzeDuplicates(ctx context.Context, meta *metamodel
 }
 
 // analyzeGaps finds gaps in ID sequences for auto-numbered entity types.
+//
+// Manual-ID types are skipped by the entity's TYPE, not by matching the
+// declared id_prefix against the prefix parsed from the ID: the parsed prefix
+// is the longest letters-and-dashes run before the digits, so a manual id such
+// as `tw-basecamp-10098661922` parses to `tw-basecamp-` and never matches the
+// declared `tw-`. Enumeration stops at the section cap ([sectionFull]), so a
+// huge gap costs no more than a small one.
 func (svc analyzeService) analyzeGaps(ctx context.Context, meta *metamodel.Metamodel) AnalysisSection {
 	section := AnalysisSection{
 		Name:        "ID Gaps",
 		Description: "Missing numbers in auto-generated ID sequences",
 	}
 
-	// Build prefix → entity type lookup and the manual-prefix skip set
-	// in a single pass over the metamodel.
-	manualPrefixes := make(map[string]bool)
-	typeByPrefix := make(map[string]string)
+	manualTypes := make(map[string]bool)
 	for typeName, entityDef := range meta.Entities {
-		for _, idPrefix := range entityDef.GetIDPrefixes() {
-			trimmed := strings.TrimSuffix(idPrefix, "-")
-			if entityDef.IsManualID() {
-				manualPrefixes[trimmed] = true
-				continue
-			}
-			typeByPrefix[trimmed] = typeName
+		if entityDef.IsManualID() {
+			manualTypes[typeName] = true
 		}
 	}
 
-	// Group IDs by prefix
+	// Group IDs by prefix, remembering the type each prefix belongs to so the
+	// data-entry UI's type column renders the type badge. The row stays inert
+	// (EntityID is empty), so isClickable in the SPA remains false.
 	prefixGroups := make(map[string][]int)
+	typeByPrefix := make(map[string]string)
 	for h, err := range svc.reads.ListEntityHeaders(ctx, store.EntityQuery{}) {
 		if err != nil {
 			break
+		}
+		if manualTypes[h.Type] {
+			continue
 		}
 		parsed, err := entity.ParseEntityID(h.ID)
 		if err != nil || parsed.Prefix == "" {
 			continue
 		}
-		if manualPrefixes[strings.TrimSuffix(parsed.Prefix, "-")] {
-			continue
-		}
 		prefixGroups[parsed.Prefix] = append(prefixGroups[parsed.Prefix], parsed.Number)
+		if cur, ok := typeByPrefix[parsed.Prefix]; !ok || h.Type < cur {
+			typeByPrefix[parsed.Prefix] = h.Type
+		}
 	}
 
 	// Sort prefixes for deterministic output
@@ -384,26 +389,17 @@ func (svc analyzeService) analyzeGaps(ctx context.Context, meta *metamodel.Metam
 	for _, prefix := range prefixes {
 		numbers := prefixGroups[prefix]
 		sort.Ints(numbers)
-
-		var gaps []int
 		for i := 1; i < len(numbers); i++ {
 			for j := numbers[i-1] + 1; j < numbers[i]; j++ {
-				gaps = append(gaps, j)
+				section.Issues = append(section.Issues, AnalysisIssue{
+					EntityType: typeByPrefix[prefix],
+					Message:    fmt.Sprintf("Missing ID: %s%03d", prefix, j),
+					Severity:   "warning",
+				})
+				if sectionFull(&section) {
+					return capIssues(section)
+				}
 			}
-		}
-
-		// EntityType is populated from the prefix → type map so the
-		// data-entry UI's type column renders the type badge. The row
-		// stays inert (EntityID is empty), so isClickable in the SPA
-		// remains false; the type is informational only.
-		entityType := typeByPrefix[strings.TrimSuffix(prefix, "-")]
-		for _, n := range gaps {
-			missingID := fmt.Sprintf("%s%03d", prefix, n)
-			section.Issues = append(section.Issues, AnalysisIssue{
-				EntityType: entityType,
-				Message:    "Missing ID: " + missingID,
-				Severity:   "warning",
-			})
 		}
 	}
 
