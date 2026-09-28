@@ -30,8 +30,8 @@ type RenameEntityCmd struct {
 }
 
 // Run dispatches `rela rename entity <old> <new>`.
-func (c *RenameEntityCmd) Run(svc *writeServices, rt *renametype.Service) error {
-	return runRenameEntity(svc, rt, c.OldType, c.NewType, c.Force, c.Plural)
+func (c *RenameEntityCmd) Run(ctx context.Context, svc *writeServices, rt *renametype.Service) error {
+	return runRenameEntity(ctx, svc, rt, c.OldType, c.NewType, c.Force, c.Plural)
 }
 
 type renameEntityInfo struct {
@@ -49,9 +49,9 @@ type renameEntityInfo struct {
 
 // coverage-ignore-func: interactive CLI - tested via integration tests
 func runRenameEntity(
-	svc *writeServices, rt *renametype.Service, oldType, newType string, force bool, plural string,
+	ctx context.Context, svc *writeServices, rt *renametype.Service, oldType, newType string, force bool, plural string,
 ) error {
-	info, err := resolveRenameEntity(svc, oldType, newType, plural)
+	info, err := resolveRenameEntity(ctx, svc, oldType, newType, plural)
 	if err != nil {
 		return err
 	}
@@ -70,7 +70,9 @@ func runRenameEntity(
 	return applyRenameEntity(rt, info)
 }
 
-func resolveRenameEntity(svc *writeServices, oldType, newType, renamePlural string) (*renameEntityInfo, error) {
+func resolveRenameEntity(
+	ctx context.Context, svc *writeServices, oldType, newType, renamePlural string,
+) (*renameEntityInfo, error) {
 	meta := svc.Meta
 	resolvedOld := meta.ResolveAlias(oldType)
 	oldDef, ok := meta.GetEntityDef(resolvedOld)
@@ -94,7 +96,7 @@ func resolveRenameEntity(svc *writeServices, oldType, newType, renamePlural stri
 		return nil, err
 	}
 	_, statErr := svc.FS.Stat(oldTemplatePath)
-	entityCount, _ := svc.Store.CountEntities(context.Background(), store.EntityQuery{Type: resolvedOld})
+	entityCount, _ := svc.Store.CountEntities(ctx, store.EntityQuery{Type: resolvedOld})
 
 	return &renameEntityInfo{
 		resolvedOld:     resolvedOld,
@@ -187,10 +189,11 @@ type RenameIDCmd struct {
 	DryRun bool   `name:"dry-run" help:"Preview changes without applying."`
 }
 
-// Run dispatches `rela rename id <old> <new>`.
-func (c *RenameIDCmd) Run(svc *writeServices) error {
-	result, err := svc.EntityManager.RenameEntity(
-		context.Background(), c.OldID, c.NewID, entity.RenameOptions{DryRun: c.DryRun})
+// Run dispatches `rela rename id <old> <new>`. ctx carries the principal the
+// CLI stamps at startup; the entity manager authorizes and audits the rename
+// against it, so it must not be replaced by a fresh context.
+func (c *RenameIDCmd) Run(ctx context.Context, svc *writeServices) error {
+	result, err := svc.EntityManager.RenameEntity(ctx, c.OldID, c.NewID, entity.RenameOptions{DryRun: c.DryRun})
 	if err != nil {
 		return err
 	}

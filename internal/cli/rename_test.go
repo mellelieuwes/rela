@@ -1,17 +1,24 @@
 package cli
 
 import (
+	"context"
+	stderrors "errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Sourcehaven-BV/rela/internal/acl"
 	"github.com/Sourcehaven-BV/rela/internal/appbuild/appbuildtest"
+	"github.com/Sourcehaven-BV/rela/internal/audit"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/output"
+	"github.com/Sourcehaven-BV/rela/internal/principal"
 	"github.com/Sourcehaven-BV/rela/internal/project"
 	"github.com/Sourcehaven-BV/rela/internal/renametype"
 	"github.com/Sourcehaven-BV/rela/internal/storage"
+	"github.com/Sourcehaven-BV/rela/internal/store"
+	"github.com/Sourcehaven-BV/rela/internal/store/memstore"
 	"github.com/Sourcehaven-BV/rela/internal/testutil"
 )
 
@@ -124,7 +131,7 @@ func TestRenameEntityCommand(t *testing.T) {
 			"REQ-002", "requirement", "Second Requirement")
 
 		// Run rename
-		err := runRenameEntity(env.svc, env.rt, "requirement", "feature", true, "")
+		err := runRenameEntity(t.Context(), env.svc, env.rt, "requirement", "feature", true, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -171,7 +178,7 @@ func TestRenameEntityCommand(t *testing.T) {
 	t.Run("error when old type not found", func(t *testing.T) {
 		env := setupRenameTestEnv(t)
 
-		err := runRenameEntity(env.svc, env.rt, "nonexistent", "feature", true, "")
+		err := runRenameEntity(t.Context(), env.svc, env.rt, "nonexistent", "feature", true, "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -183,7 +190,7 @@ func TestRenameEntityCommand(t *testing.T) {
 	t.Run("error when new type already exists", func(t *testing.T) {
 		env := setupRenameTestEnv(t)
 
-		err := runRenameEntity(env.svc, env.rt, "requirement", "decision", true, "")
+		err := runRenameEntity(t.Context(), env.svc, env.rt, "requirement", "decision", true, "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -195,7 +202,7 @@ func TestRenameEntityCommand(t *testing.T) {
 	t.Run("error when new type name is invalid", func(t *testing.T) {
 		env := setupRenameTestEnv(t)
 
-		err := runRenameEntity(env.svc, env.rt, "requirement", "Bad-Name", true, "")
+		err := runRenameEntity(t.Context(), env.svc, env.rt, "requirement", "Bad-Name", true, "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -212,7 +219,7 @@ func TestRenameEntityCommand(t *testing.T) {
 			filepath.Join(dir, "entities", "requirements", "REQ-001.md"),
 			"REQ-001", "requirement", "Test")
 
-		err := runRenameEntity(env.svc, env.rt, "requirement", "policy", true, "policies")
+		err := runRenameEntity(t.Context(), env.svc, env.rt, "requirement", "policy", true, "policies")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -233,7 +240,7 @@ func TestRenameEntityCommand(t *testing.T) {
 		templatePath := filepath.Join(templateDir, "requirement.md")
 		os.WriteFile(templatePath, []byte("---\nstatus: draft\n---\n"), 0644)
 
-		err := runRenameEntity(env.svc, env.rt, "requirement", "feature", true, "")
+		err := runRenameEntity(t.Context(), env.svc, env.rt, "requirement", "feature", true, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -254,7 +261,7 @@ func TestRenameEntityCommand(t *testing.T) {
 		os.RemoveAll(env.paths.EntitiesDir)
 		os.MkdirAll(env.paths.EntitiesDir, 0755)
 
-		err := runRenameEntity(env.svc, env.rt, "requirement", "feature", true, "")
+		err := runRenameEntity(t.Context(), env.svc, env.rt, "requirement", "feature", true, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -265,4 +272,69 @@ func TestRenameEntityCommand(t *testing.T) {
 			t.Error("metamodel should contain 'feature:' key even with no entity directory")
 		}
 	})
+}
+
+// TestRenameIDCommand_UnderACLPolicy pins BUG: `rela rename id` must run
+// under the principal the CLI stamps on its context. With an acl.yaml every
+// write is authorized against that principal, so a command that dropped it for
+// context.Background() failed with "principal is unstamped" even for a user
+// the policy grants — and without a policy it recorded the rename as nobody's.
+func TestRenameIDCommand_UnderACLPolicy(t *testing.T) {
+	_ = withOutput(t, output.FormatTable)
+	meta, err := metamodel.Parse([]byte(testutil.SimpleMetamodelYAML()))
+	if err != nil {
+		t.Fatalf("parse metamodel: %v", err)
+	}
+
+	policyPath := filepath.Join(t.TempDir(), "acl.yaml")
+	policyYAML := "roles:\n  admin:\n    create: [\"*\"]\n    update: [\"*\"]\n    delete: [\"*\"]\n    read: [\"*\"]\n" +
+		"assignments:\n  alice: admin\n"
+	if err = os.WriteFile(policyPath, []byte(policyYAML), 0o600); err != nil {
+		t.Fatalf("write acl.yaml: %v", err)
+	}
+	policy, err := acl.LoadPolicy(policyPath)
+	if err != nil {
+		t.Fatalf("load acl.yaml: %v", err)
+	}
+
+	st := memstore.New()
+	decl, err := acl.NewDeclarative(policy, acl.NewStoreGraph(st), st,
+		acl.WithPrincipalLookup(acl.NewStorePrincipalLookup(st)))
+	if err != nil {
+		t.Fatalf("acl.NewDeclarative: %v", err)
+	}
+	sink := audit.NewMemory()
+	b, err := newCLIBundles(appbuildtest.New(meta,
+		appbuildtest.WithStore(st), appbuildtest.WithDeclarative(decl), appbuildtest.WithAudit(sink)))
+	if err != nil {
+		t.Fatalf("newCLIBundles: %v", err)
+	}
+	if err = st.CreateEntity(t.Context(),
+		testutil.EntityFor(meta, "requirement").ID("REQ-001").Build()); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+
+	ctx := principal.With(context.Background(), principal.Principal{User: "alice", Tool: principal.ToolCLI})
+	if err = (&RenameIDCmd{OldID: "REQ-001", NewID: "REQ-100"}).Run(ctx, b.write); err != nil {
+		t.Fatalf("rename id by a user the policy grants: %v", err)
+	}
+
+	if _, err = st.GetEntity(t.Context(), "REQ-100"); err != nil {
+		t.Fatalf("renamed entity not found under its new id: %v", err)
+	}
+	if _, err = st.GetEntity(t.Context(), "REQ-001"); err == nil || !stderrors.Is(err, store.ErrNotFound) {
+		t.Fatalf("old id must be gone after the rename, got err=%v", err)
+	}
+	var renameRec *audit.Record
+	for _, rec := range sink.Records() {
+		if rec.Op == audit.OpRenameEntity {
+			renameRec = &rec
+		}
+	}
+	if renameRec == nil {
+		t.Fatalf("no rename-entity audit record; got %+v", sink.Records())
+	}
+	if renameRec.Principal.User != "alice" || renameRec.Principal.Tool != principal.ToolCLI {
+		t.Errorf("rename attributed to %+v, want alice via %s", renameRec.Principal, principal.ToolCLI)
+	}
 }
