@@ -221,6 +221,31 @@ func TestTwinCLI_SyncLoop(t *testing.T) {
 	assert.Equal(t, []any{"body", "code", "status"}, shown[0]["owned_fields"])
 }
 
+// TestTwinCLI_RenameKeepsTheTwinInSync: renaming a synced entity changes its
+// version but none of its content, so the twin follows the new id without
+// landing on the work list with nothing to push.
+func TestTwinCLI_RenameKeepsTheTwinInSync(t *testing.T) {
+	p := newTwinProject(t, twinSchema)
+	ctx := twinCtx()
+	id := p.createScenario(t, "Checkout")
+	_ = withOutput(t, output.FormatTable)
+	require.NoError(t, (&TwinLinkCmd{EntityID: id, System: "basecamp", ExternalID: "todo-1",
+		URL: "https://example.com/todos/1"}).Run(ctx, p.w))
+	require.NoError(t, (&TwinPullCmd{System: "basecamp", ExternalID: "todo-1",
+		Remote:          p.remoteFile(t, `{"properties": {"title": "Checkout", "status": "done"}, "body": "From Basecamp."}`),
+		RemoteUpdatedAt: "2026-09-20T14:03:11Z"}).Run(ctx, p.w))
+
+	require.NoError(t, (&RenameIDCmd{OldID: id, NewID: "SC-900"}).Run(p.w))
+
+	var pending []map[string]any
+	p.runJSON(t, &TwinPendingCmd{System: "basecamp"}, &pending)
+	assert.Empty(t, pending)
+	var shown []map[string]any
+	p.runJSON(t, &TwinShowCmd{EntityID: "SC-900"}, &shown)
+	require.Len(t, shown, 1)
+	assert.Equal(t, "in_sync", shown[0]["state"])
+}
+
 // TestTwinCLI_RejectedPullSucceeds: a sync write rela refuses on its merits
 // (here a unique property already taken) is a finding, not a failed command.
 func TestTwinCLI_RejectedPullSucceeds(t *testing.T) {

@@ -24,8 +24,14 @@ import (
 // value with an `EntityNotFound() bool` method returning true (the
 // entitymanager convention, see lua.NotFoundError); the service then treats
 // the twin as gone.
+//
+// VersionAt returns the version e would have if it were stored under id, all
+// else equal. A version folds in the entity id, so a rename changes it
+// without changing any content; the service uses VersionAt to tell a rename
+// apart from an edit.
 type EntityReader interface {
 	GetEntityVersion(ctx context.Context, id string) (*entity.Entity, string, error)
+	VersionAt(e *entity.Entity, id string) string
 }
 
 // SyncWriter writes a pulled change to the twinned entity. It is the
@@ -682,13 +688,50 @@ func (s *Service) OwnedFields(ctx context.Context, entityType, entityID string) 
 
 // EntityRenamed follows a renamed entity: its twins now target newID.
 //
+// A version folds in the entity id, so the rename alone would leave every
+// twin's base version behind and report the twin as changed in rela with
+// nothing to push. A twin whose base version is the renamed entity's version
+// under oldID therefore moves on to its version under newID; a twin whose
+// base was agreed at other content keeps it, as that change is still to push.
+//
 // It implements entitymanager's AliasRewriter hook, like the comment service.
 // That hook runs after the rename and LOGS an error rather than failing the
 // rename, so a failed retarget (a live twin of both ids in one system) leaves
 // the twins on the old id: until an operator relinks them they own nothing on
 // the renamed entity and sync against an id that no longer resolves.
 func (s *Service) EntityRenamed(ctx context.Context, oldID, newID string) error {
-	return s.store.Retarget(ctx, oldID, newID)
+	if err := s.store.Retarget(ctx, oldID, newID); err != nil {
+		return err
+	}
+	e, version, err := s.reader.GetEntityVersion(ctx, newID)
+	switch {
+	case isEntityNotFound(err):
+		return nil // renamed or deleted again since: that event moves the twins on
+	case err != nil:
+		return fmt.Errorf("twins: reading renamed %s: %w", newID, err)
+	}
+	renamedFrom := s.reader.VersionAt(e, oldID)
+	list, err := s.store.ForTarget(ctx, newID)
+	if err != nil {
+		return err
+	}
+	for _, tw := range list {
+		if tw.BaseVersion != renamedFrom {
+			continue
+		}
+		_, err := s.store.Modify(ctx, tw.System, tw.ExternalID, func(cur Twin) (Twin, error) {
+			// Under the lock: a sync or another rename since the list was
+			// read has recorded its own footing, which stands.
+			if cur.Target.ID == newID && cur.BaseVersion == renamedFrom {
+				cur.BaseVersion = version
+			}
+			return cur, nil
+		})
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	}
+	return nil
 }
 
 // EntityFaceDeleted is a no-op. A twin belongs to a whole entity, never to one

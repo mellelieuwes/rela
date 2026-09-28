@@ -149,6 +149,14 @@ func (r twinEntityReader) GetEntityVersion(ctx context.Context, id string) (*ent
 	return e, string(store.VersionOf(e)), nil
 }
 
+// VersionAt returns the version e would have if stored under id. A shallow
+// copy is enough: the version only reads the entity.
+func (twinEntityReader) VersionAt(e *entity.Entity, id string) string {
+	at := *e
+	at.ID = id
+	return string(store.VersionOf(&at))
+}
+
 // twinEntityNotFoundError carries the structural EntityNotFound marker the twins
 // service classifies a missing entity by (it imports neither store nor
 // entitymanager). errors.Is(err, store.ErrNotFound) keeps working.

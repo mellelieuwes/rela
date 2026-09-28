@@ -40,6 +40,12 @@ func (r twinStoreReader) GetEntityVersion(ctx context.Context, id string) (*enti
 	return e, string(store.VersionOf(e)), nil
 }
 
+func (twinStoreReader) VersionAt(e *entity.Entity, id string) string {
+	at := *e
+	at.ID = id
+	return string(store.VersionOf(&at))
+}
+
 // refusingSyncWriter fails every sync write; the scenarios below never write.
 type refusingSyncWriter struct{}
 

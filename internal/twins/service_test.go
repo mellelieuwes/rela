@@ -80,6 +80,12 @@ func (f *entities) GetEntityVersion(_ context.Context, id string) (*entity.Entit
 	return e.Clone(), string(store.VersionOf(e)), nil
 }
 
+func (*entities) VersionAt(e *entity.Entity, id string) string {
+	at := e.Clone()
+	at.ID = id
+	return string(store.VersionOf(at))
+}
+
 func (f *entities) PatchEntity(_ context.Context, id string, p entity.Patch) (*entity.UpdateResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -819,6 +825,72 @@ func TestLifecycle(t *testing.T) {
 	})
 }
 
+// TestEntityRenamed_CarriesTheBaseVersion pins that a rename alone does not
+// put a twin on the work list: the version folds in the entity id, so the
+// base version must follow the rename, while a change made in rela before the
+// rename stays pending.
+func TestEntityRenamed_CarriesTheBaseVersion(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name        string
+		sync        bool   // push before the rename, so the twin has a base
+		editTitle   string // set in rela before the rename; empty = no edit
+		wantReasons []string
+		wantPush    []twins.FieldValue
+		wantCarried bool
+	}{
+		{name: "an unchanged synced entity stays in sync", sync: true, wantCarried: true},
+		{
+			name: "a change since the sync stays pending", sync: true, editTitle: "Changed in rela",
+			wantReasons: []string{"changed in rela"},
+			wantPush:    []twins.FieldValue{{Field: "title", Base: "Login", Local: "Changed in rela"}},
+		},
+		{
+			name: "a never-synced twin is pending only for that", wantCarried: true,
+			wantReasons: []string{"never synced"},
+			wantPush: []twins.FieldValue{
+				{Field: "estimate", Local: 3}, {Field: "priority", Local: "low"},
+				{Field: "title", Local: "Login"}, {Field: "body", Local: "Steps"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFixture(t)
+			if tc.sync {
+				fx.synced(ctx, t, "SC-1", "42")
+			} else {
+				fx.link(ctx, t, "SC-1", "basecamp", "42")
+			}
+			if tc.editTitle != "" {
+				fx.ents.set("SC-1", "title", tc.editTitle)
+			}
+			before := fx.get(ctx, t, "42").BaseVersion
+
+			fx.ents.rename("SC-1", "SC-9")
+			require.NoError(t, fx.svc.EntityRenamed(ctx, "SC-1", "SC-9"))
+
+			items, err := fx.svc.Pending(ctx, "basecamp")
+			require.NoError(t, err)
+			var reasons []string
+			var push []twins.FieldValue
+			for _, it := range items {
+				reasons, push = append(reasons, it.Reasons...), append(push, it.PushSet...)
+			}
+			require.Equal(t, tc.wantReasons, reasons)
+			require.Equal(t, tc.wantPush, push)
+
+			stored := fx.get(ctx, t, "42")
+			require.Equal(t, "SC-9", stored.Target.ID)
+			if tc.wantCarried {
+				require.Equal(t, fx.ents.version(ctx, t, "SC-9"), stored.BaseVersion)
+			} else {
+				require.Equal(t, before, stored.BaseVersion, "a change still to push keeps its base version")
+			}
+		})
+	}
+}
+
 // pushSetOf42 returns the push set pending lists for basecamp/42, and the
 // version it was read at.
 func (fx fixture) pushSetOf42(ctx context.Context, t *testing.T) (push []twins.FieldValue, version string) {
@@ -1099,7 +1171,10 @@ func TestPull_OvertakenWhileWriting(t *testing.T) {
 		want  error
 	}{
 		{"a rename retargeted it", func(ctx context.Context, fx fixture) error {
-			return fx.svc.EntityRenamed(ctx, "SC-1", "SC-9")
+			// The event runs inside the entity write, under the fake's lock,
+			// so it cannot re-read the entity the way the rename hook does;
+			// the retarget is what overtakes the pull.
+			return fx.store.Retarget(ctx, "SC-1", "SC-9")
 		}, twins.ErrStale},
 		{"another sync recorded a base", func(ctx context.Context, fx fixture) error {
 			_, err := fx.store.Modify(ctx, "basecamp", "42", func(tw twins.Twin) (twins.Twin, error) {
