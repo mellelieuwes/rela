@@ -3516,8 +3516,9 @@ Direct items and groups can be freely mixed in any order.
 
 ## Actions
 
-Actions define quick operations that can be triggered from list views or the sidebar. An action
-either mutates entity properties declaratively (`set`) or runs a Lua script (`script`).
+Actions define quick operations that can be triggered from list views, the sidebar, or an
+entity's detail page. An action either mutates entity properties declaratively (`set`) or runs a
+Lua script (`script`).
 
 ### Defining Actions
 
@@ -3556,7 +3557,10 @@ actions:
 | `set`         | map    | Property key-value pairs to set on the entity (mutually exclusive with `script`) |
 | `script`      | string | Lua script path, relative to the `actions/` directory (mutually exclusive with `set`) |
 | `params`      | map    | Static key-value parameters from config, exposed as `rela.params` (values must be strings — quote them in YAML) |
-| `confirm`     | bool   | Show a confirmation dialog before executing (default: `false`)  |
+| `confirm`     | bool or string | Show a confirmation dialog before a list or detail-page action runs (default: `false`). A string is the dialog text. The sidebar does not ask |
+| `available_on`| map    | Offer the action on detail pages — see [Actions on the detail page](#actions-on-the-detail-page). Requires `script` |
+| `when`        | string | Predicate that must hold for the entity. Requires `available_on` |
+| `permission`  | string | Global named permission the caller must hold to run the action from a list, the sidebar, a next-action offer or a detail page |
 | `request`     | map    | Opt into request-scoped execution — see [Request-scoped actions](#request-scoped-actions). Requires `script` |
 | `capabilities`| map    | Ambient capability grant (`http`, `ai`, `write_file`, named `secrets`). Omitting it grants none |
 
@@ -3600,6 +3604,95 @@ navigation:
 When clicked, the action executes. If the action script returns a `redirect`, the UI navigates
 to that path. If it returns a `message`, a toast notification is shown.
 
+### Actions on the detail page
+
+`available_on` offers a script action as a button on an entity's detail page.
+The script runs against that entity, as the user who clicked, so its writes are
+checked against that user's ACL and recorded under their name in the audit log.
+A [command](#commands) cannot do this: it runs a shell process that does not
+know who started it.
+
+A typical case is a document generated from the graph and reviewed before it is
+approved. The type has a `concept` and an `approved` face, and several document
+kinds share it:
+
+```yaml
+actions:
+  regenerate-soa:
+    label: "Regenerate"
+    script: regenerate-soa.lua
+    available_on:
+      entity_types: [document]
+      faces: [concept]
+    when: "entity.kind == 'soa'"
+    permission: documents:regenerate
+    confirm: "The concept will be overwritten with current data. Continue?"
+```
+
+```lua
+-- actions/regenerate-soa.lua
+local body = { "# Statement of applicability", "" }
+for _, c in ipairs(rela.list_entities("control")) do
+    table.insert(body, "- " .. c.id .. ": " .. (c.properties.title or ""))
+end
+-- entity.face is the face the page shows; write back to that same face.
+-- It is "" on a type without faces, where the bare id is the address.
+local address = entity.id
+if entity.face ~= "" then address = address .. "@" .. entity.face end
+rela.update_entity(address, {}, table.concat(body, "\n"))
+return { message = "Regenerated" }
+```
+
+The button appears only when all of these hold:
+
+- **`available_on.entity_types`** lists the entity's type. Without
+  `available_on`, the action appears on no detail page.
+- **`available_on.faces`**, if given, lists the face the page shows. Omit it to
+  offer the action on every face. Each face must be declared on every listed
+  type; the server refuses to start otherwise.
+- **`when`**, if given, holds for the entity. It uses the same predicate
+  language as a list's [`condition:`](#conditions-condition). If it reads a
+  property that `visible:` hides from the user, the action is not offered to
+  them at all, so a test such as `entity.status ~= 'approved'` cannot pass on
+  a value they cannot see. `related(...)` is not available here. An
+  expression that does not compile is a startup error.
+- **`permission`**, if given, is held by the user. It is a global named
+  permission from a role's `permissions:` list in `acl.yaml`, as on commands
+  and documents. As there, the name is not checked against `acl.yaml` at
+  load, and with no `acl.yaml` (or under `--read-only`) every user holds it.
+  `rela acl audit` counts it as in use.
+
+The server decides this, not the browser. It publishes each offered action in
+the entity's `_actions` map as `action:<id>`, and checks the same rules again
+when the action runs. A request for an entity that does not match is refused
+before the script starts, so knowing an action's id does not let anyone run it
+against another entity. `permission` is also enforced on every run of an
+action without `available_on`, from a list, the sidebar or a next-action
+offer. The IdP webhook is the exception: it runs its action as the webhook
+receiver rather than as a user, so `permission` does not apply there, and it
+refuses an action with `available_on`.
+
+The check and the script run under the same write lock, so no other write in
+the same server process can change the entity in between. If the
+configuration was reloaded while the request waited for the lock, the request
+is refused and the user can retry. With several `rela-server` processes on one
+PostgreSQL database, a write from another process can still land between the
+check and the script; the script's own writes remain limited by the user's
+ACL.
+
+The script receives the entity in the `entity` global, including `entity.face`.
+After it finishes, the page shows the returned `message` and reloads the entity,
+so the new content is visible at once.
+
+An action with `available_on` needs an entity, so it cannot be referenced from
+a list's `actions`, a navigation entry, or a next-action offer. The server
+refuses to start if one is. It is also not offered in edit forms: a script that
+rewrites the body while a form is open would conflict with the form's autosave.
+
+**Timeout.** Like every action, the script has 5 seconds. The action holds the
+global write lock while it runs, so other writes wait. Keep regeneration within
+that limit, for example by reading only what the document needs.
+
 ### Lua Action Scripts
 
 Action scripts live in the `actions/` directory at the project root. They have full access
@@ -3611,7 +3704,7 @@ to control the UI response.
 | Source        | Where           | Populated when                                                              |
 | ------------- | --------------- | --------------------------------------------------------------------------- |
 | Static config | `rela.params`   | Always — values from the action's `params:` map in `data-entry.yaml`        |
-| Selected row  | `entity` global | Only when invoked from a list against a selected row (one call per entity). The table has `id`, `type`, `properties`, `content`, `mod_time`, plus `prop(name, default)` and `strip_prefix()` methods |
+| Selected row  | `entity` global | Only when invoked against an entity: from a list on a selected row (one call per entity), or from a detail page. The table has `id`, `type`, `face`, `properties`, `content`, `mod_time`, plus `prop(name, default)` and `strip_prefix()` methods |
 
 When invoked from a navigation sidebar button, no entity is selected — the
 `entity` global is `nil`. Always nil-check it.

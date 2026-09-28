@@ -16,6 +16,12 @@ import (
 // does not exist in the loaded config — an operator misconfiguration.
 var errWebhookActionMissing = errors.New("dataentry: configured webhook action not found")
 
+// errWebhookActionEntityBound is returned when the configured provisioning
+// action has available_on. Such an action needs an entity and is gated on
+// the invoking user; the webhook supplies neither (TKT-VVS16W).
+var errWebhookActionEntityBound = errors.New(
+	"dataentry: configured webhook action has available_on and can only run from a detail page")
+
 // WebhookClaims is the verified subset of an inbound webhook the receiver acts
 // on. It mirrors jwtauth.WebhookClaims but is declared HERE so the dataentry
 // package needn't import jwtauth (the inward-pointing layering rule — the same
@@ -158,6 +164,13 @@ func dispatchWebhookAction(ctx context.Context, h *writeHandler, actionID string
 		// the log; the 502 the caller sends will surface it operationally too.
 		slog.Error("idp webhook: configured action not found", "action", actionID)
 		return errWebhookActionMissing
+	}
+	// The webhook runs as the webhook-receiver principal, not a user, so an
+	// action's `permission:` does not apply here: the verified callback is the
+	// authorization. An entity-bound action cannot run here at all.
+	if action.AvailableOn != nil {
+		slog.Error("idp webhook: configured action has available_on", "action", actionID)
+		return errWebhookActionEntityBound
 	}
 
 	// Stamp the webhook-receiver principal so the provisioned entity is attributed

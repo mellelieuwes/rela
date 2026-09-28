@@ -284,7 +284,7 @@ type dataEntryPermissions struct {
 
 // UsedPermissions returns every permission referenced by a data-entry UI gate:
 // documents, dashboard cards, navigation entries (recursively, since groups
-// nest items) and commands.
+// nest items), commands and actions.
 func (d *dataEntryPermissions) UsedPermissions() []string {
 	if d == nil || d.cfg == nil {
 		return nil
@@ -300,6 +300,9 @@ func (d *dataEntryPermissions) UsedPermissions() []string {
 	}
 	for _, cmd := range d.cfg.Commands {
 		add(cmd.Permission)
+	}
+	for _, action := range d.cfg.Actions {
+		add(action.Permission)
 	}
 	if d.cfg.Dashboard != nil {
 		for _, card := range d.cfg.Dashboard.Cards {

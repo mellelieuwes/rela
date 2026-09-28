@@ -2,10 +2,9 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useSchemaStore, useUIStore, useGitStore } from '@/stores'
-import { useScriptErrorStore } from '@/stores/scriptError'
 import { getSidebar, runAction } from '@/api'
 import { isCancelledFetch } from '@/composables/usePageData'
-import { ApiError, getErrorMessage, getScriptError } from '@/api/errors'
+import { useActionFeedback } from '@/composables/useActionFeedback'
 import type { SidebarGroup, SidebarItem } from '@/types'
 import { isInputFocused } from '@/utils/dom'
 import {
@@ -26,7 +25,7 @@ import { apiUrl } from '@/api/base'
 const schemaStore = useSchemaStore()
 const uiStore = useUIStore()
 const gitStore = useGitStore()
-const scriptErrorStore = useScriptErrorStore()
+const { reportResult, reportError } = useActionFeedback()
 const route = useRoute()
 const router = useRouter()
 
@@ -155,22 +154,12 @@ async function handleAction(item: SidebarItem, ev?: Event) {
   actionInFlight.value.add(item.action)
   try {
     const response = await runAction(item.action)
-    if (response?.message) {
-      const type = response.message_type || 'success'
-      uiStore[type](response.message)
-    }
+    reportResult(response)
     if (response?.redirect) {
       router.push(response.redirect)
     }
   } catch (err: unknown) {
-    const scriptErr = getScriptError(err)
-    if (scriptErr) {
-      scriptErrorStore.show(scriptErr, triggerEl)
-    } else {
-      const corrID = err instanceof ApiError ? err.correlationId : undefined
-      const msg = getErrorMessage(err, 'Action failed')
-      uiStore.error(corrID ? `${msg} (ref: ${corrID})` : msg)
-    }
+    reportError(err, triggerEl)
   } finally {
     actionInFlight.value.delete(item.action)
   }

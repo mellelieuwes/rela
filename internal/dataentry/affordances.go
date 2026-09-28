@@ -126,6 +126,13 @@ type affordanceService struct {
 	currentEdgesByPeer func(
 		ctx context.Context, entityID, canonical string, incoming bool,
 	) map[string]*entityPkg.Relation
+	// schema and actionConditions back the detail-action affordance
+	// (TKT-VVS16W). Live accessors because config reloads and the condition
+	// compiler is injected after construction (SetViewConditions). Nil
+	// schema offers no detail actions; nil actionConditions offers none
+	// that declare a when.
+	schema           func() *Schema
+	actionConditions func() ViewConditionFunc
 }
 
 // perItemVerbs are the verbs computed per entity instance.
@@ -1227,6 +1234,12 @@ func (svc affordanceService) attachEntityAffordances(ctx context.Context, e *ent
 	}
 	if offers := svc.computeCopyOffers(ctx, e); offers != nil {
 		result.Copies = &offers
+	}
+	if detail := svc.computeDetailActions(ctx, e); detail != nil {
+		if result.Actions == nil {
+			result.Actions = make(map[string]bool, len(detail))
+		}
+		maps.Copy(result.Actions, detail)
 	}
 	faces := svc.computeFaces(ctx, e)
 	result.Faces = &faces

@@ -61,6 +61,10 @@ type viewConditionMatcher struct {
 	meta *metamodel.Metamodel
 }
 
+// EntityAttributes returns the entity fields the condition reads, so a
+// caller can refuse a condition over a field the principal cannot see.
+func (v viewConditionMatcher) EntityAttributes() []string { return v.m.EntityAttributes() }
+
 // MatchPage returns one verdict per row, in order. An evaluation error is
 // returned, never read as "no match".
 func (v viewConditionMatcher) MatchPage(

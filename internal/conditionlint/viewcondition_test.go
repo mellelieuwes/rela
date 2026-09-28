@@ -150,3 +150,72 @@ func TestCompileViewConditions_NilInputs(t *testing.T) {
 	require.Nil(t, progs)
 	require.Empty(t, problems)
 }
+
+// An action's when compiles once per type in available_on (TKT-VVS16W).
+func TestCompileViewConditions_ActionWhen(t *testing.T) {
+	scope := &dataentryconfig.ActionScope{EntityTypes: []string{"taak"}}
+	tests := []struct {
+		name     string
+		action   dataentryconfig.Action
+		wantProg bool
+		wantProb string
+	}{
+		{
+			name:     "compiles against the listed type",
+			action:   dataentryconfig.Action{Script: "a.lua", AvailableOn: scope, When: "entity.status == 'open'"},
+			wantProg: true,
+		},
+		{
+			name:     "current_user is available",
+			action:   dataentryconfig.Action{Script: "a.lua", AvailableOn: scope, When: "is_current_user(entity.status)"},
+			wantProg: true,
+		},
+		{
+			name:     "unknown property is a problem",
+			action:   dataentryconfig.Action{Script: "a.lua", AvailableOn: scope, When: "entity.nope == 'x'"},
+			wantProb: `actions["regen"]: when does not compile against entity type "taak"`,
+		},
+		{
+			name:     "syntax error is a problem",
+			action:   dataentryconfig.Action{Script: "a.lua", AvailableOn: scope, When: "entity.status =="},
+			wantProb: "when does not compile",
+		},
+		{
+			name:     "related() is refused",
+			action:   dataentryconfig.Action{Script: "a.lua", AvailableOn: scope, When: "related(entity, 'blocks')"},
+			wantProb: "is not available in an action's when",
+		},
+		{
+			name:   "when without available_on is left to structural validation",
+			action: dataentryconfig.Action{Script: "a.lua", When: "entity.status == 'open'"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &dataentryconfig.Config{Actions: map[string]dataentryconfig.Action{"regen": tc.action}}
+			progs, problems := CompileViewConditions(cfg, vcMeta())
+			key := ViewConditionKey{ViewConditionAction, dataentryconfig.ActionConditionID("regen", "taak")}
+			if tc.wantProb != "" {
+				require.Len(t, problems, 1)
+				require.Contains(t, problems[0], tc.wantProb)
+				return
+			}
+			require.Empty(t, problems)
+			_, has := progs[key]
+			require.Equal(t, tc.wantProg, has)
+		})
+	}
+}
+
+// The matcher for an action key evaluates against the type encoded in its id.
+func TestViewConditionMatchers_ActionWhen(t *testing.T) {
+	cfg := &dataentryconfig.Config{Actions: map[string]dataentryconfig.Action{"regen": {
+		Script: "a.lua", When: "entity.status == 'open'",
+		AvailableOn: &dataentryconfig.ActionScope{EntityTypes: []string{"taak"}},
+	}}}
+	lookup, problems := ViewConditionMatchers(cfg, vcMeta())
+	require.Empty(t, problems)
+	m, ok := lookup(string(ViewConditionAction), dataentryconfig.ActionConditionID("regen", "taak"))
+	require.True(t, ok)
+	require.Equal(t, "taak", m.EntityType())
+}

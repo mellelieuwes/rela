@@ -86,7 +86,7 @@ func TestWebhook_DedupsByID(t *testing.T) {
 		t.Fatalf("redelivery status = %d (%s)", rec.Code, rec.Body.String())
 	}
 
-	got := countEntities(t, app, "ticket")
+	got := countTickets(t, app)
 	if got != 1 {
 		t.Fatalf("action ran %d times; want 1 (redelivery must be deduped)", got)
 	}
@@ -104,7 +104,7 @@ func TestWebhook_RejectsBadSignature(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
-	if n := countEntities(t, app, "ticket"); n != 0 {
+	if n := countTickets(t, app); n != 0 {
 		t.Fatalf("action ran on a rejected webhook (%d entities)", n)
 	}
 }
@@ -120,7 +120,7 @@ func TestWebhook_MissingUserID(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	if n := countEntities(t, app, "ticket"); n != 0 {
+	if n := countTickets(t, app); n != 0 {
 		t.Fatalf("action ran despite missing user_id (%d entities)", n)
 	}
 }
@@ -165,11 +165,11 @@ func TestSeenSet_TTLExpiry(t *testing.T) {
 	}
 }
 
-// countEntities returns how many entities of the given type exist in the app's
-// store — used to count action runs.
-func countEntities(t *testing.T, app *App, typ string) int {
+// countTickets returns how many tickets exist in the app's store. The webhook
+// test scripts create one ticket per run, so this counts action runs.
+func countTickets(t *testing.T, app *App) int {
 	t.Helper()
-	return len(entitiesByType(app, typ))
+	return len(entitiesByType(app, "ticket"))
 }
 
 // TestWebhook_ReachableThroughRouter drives POST /webhooks/idp through the REAL
@@ -202,5 +202,28 @@ func TestWebhook_ReachableThroughRouter(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "<!") || strings.Contains(rec.Body.String(), "<html") {
 		t.Fatalf("POST /webhooks/idp returned an HTML body — the SPA shell answered, "+
 			"not the webhook handler. Status %d", rec.Code)
+	}
+}
+
+// TestWebhook_RefusesEntityBoundAction: an action with available_on needs an
+// entity and a user, which the IdP webhook supplies neither of, so it never
+// runs there (TKT-VVS16W).
+func TestWebhook_RefusesEntityBoundAction(t *testing.T) {
+	script := `rela.create_entity("ticket", { title = "should-not-run" })
+	           return { message = "ok" }`
+	v := stubWebhookVerifier{claims: WebhookClaims{
+		Event: "membership.created", UserID: "usr_1", OrgID: "org_1", ID: "evt_bound",
+	}}
+	app := newWebhookTestApp(t, script, v)
+	app.Cfg().Actions["idp-sync"] = dataentryconfig.Action{
+		Script:      "idp-sync.lua",
+		AvailableOn: &dataentryconfig.ActionScope{EntityTypes: []string{"ticket"}},
+	}
+
+	if rec := postWebhook(app, "b1"); rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (%s)", rec.Code, rec.Body.String())
+	}
+	if n := countTickets(t, app); n != 0 {
+		t.Fatalf("entity-bound action ran from the webhook (%d entities)", n)
 	}
 }

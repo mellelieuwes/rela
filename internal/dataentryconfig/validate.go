@@ -577,9 +577,11 @@ func validateNavEntry(nav NavigationEntry, cfg *Config) []string {
 	}
 
 	if nav.Action != "" {
-		if _, ok := cfg.Actions[nav.Action]; !ok {
+		if a, ok := cfg.Actions[nav.Action]; !ok {
 			errs = append(errs, fmt.Sprintf(
 				"navigation: references unknown action %q", nav.Action))
+		} else if a.AvailableOn != nil {
+			errs = append(errs, entityBoundActionRefError("navigation", nav.Action))
 		}
 	}
 
@@ -2387,6 +2389,7 @@ func validateActions(cfg *Config, meta *metamodel.Metamodel) []string {
 		}
 
 		errs = append(errs, validateActionRequest(id, action, hasScript)...)
+		errs = append(errs, validateActionScope(id, action, hasScript, meta)...)
 
 		// Key validation (optional — only required when referenced by a list)
 		if action.Key != "" {
@@ -2411,6 +2414,11 @@ func validateActions(cfg *Config, meta *metamodel.Metamodel) []string {
 				errs = append(errs, fmt.Sprintf(
 					"list %q: references unknown action %q", listID, actionID))
 				continue
+			}
+
+			if action.AvailableOn != nil {
+				errs = append(errs, entityBoundActionRefError(
+					fmt.Sprintf("list %q", listID), actionID))
 			}
 
 			// Actions referenced by lists must have label and key
@@ -2442,6 +2450,58 @@ func validateActions(cfg *Config, meta *metamodel.Metamodel) []string {
 	}
 
 	return errs
+}
+
+// validateActionScope checks the detail-page keys of one action
+// (TKT-VVS16W): available_on, and when, which only means something with it.
+// The when expression itself is compiled by conditionlint, which knows the
+// predicate language; this checks only the structure.
+func validateActionScope(id string, action Action, hasScript bool, meta *metamodel.Metamodel) []string {
+	var errs []string
+	scope := action.AvailableOn
+	if scope == nil {
+		if action.When != "" {
+			errs = append(errs, fmt.Sprintf(
+				"actions: %q has when but no available_on (when decides which detail pages "+
+					"offer the action, so it needs available_on to apply to)", id))
+		}
+		return errs
+	}
+	if !hasScript {
+		errs = append(errs, fmt.Sprintf(
+			"actions: %q has available_on but no script (a detail-page action runs a script)", id))
+	}
+	if len(scope.EntityTypes) == 0 {
+		errs = append(errs, fmt.Sprintf(
+			"actions: %q available_on needs at least one entity type in entity_types", id))
+	}
+	for _, et := range scope.EntityTypes {
+		def, ok := meta.GetEntityDef(et)
+		if !ok {
+			errs = append(errs, fmt.Sprintf(
+				"actions: %q available_on references unknown entity type %q", id, et))
+			continue
+		}
+		for _, face := range scope.Faces {
+			if _, declared := def.Faces[face]; !declared {
+				errs = append(errs, fmt.Sprintf(
+					"actions: %q available_on face %q is not declared on entity type %q",
+					id, face, et))
+			}
+		}
+	}
+	return errs
+}
+
+// entityBoundActionRefError reports a reference to an action with
+// available_on from a surface that cannot supply the entity address such an
+// action requires. Without it the button would render and every click would
+// fail.
+func entityBoundActionRefError(where, actionID string) string {
+	return fmt.Sprintf(
+		"%s: references action %q, which has available_on and runs only against one entity "+
+			"on its detail page; declare a separate action (it may share the script) for this surface",
+		where, actionID)
 }
 
 func validateCommands(cfg *Config, meta *metamodel.Metamodel) []string {

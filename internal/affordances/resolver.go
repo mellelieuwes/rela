@@ -430,7 +430,7 @@ func (r *PolicyResolver) FieldVerdicts(ctx context.Context, e *entity.Entity) Fi
 	// visible by a globally-held role is hidden. Deliberately stricter than a
 	// live read; a holder of acl.PermHistoryReadRedacted bypasses redaction
 	// entirely at the handler.
-	if isHistoricalSubject(ctx) && r.typesWithVisible[e.Type] {
+	if IsHistoricalSubject(ctx) && r.typesWithVisible[e.Type] {
 		visible.optIn("hidden")
 	}
 
@@ -824,7 +824,7 @@ func (r *PolicyResolver) resolveViaDeclarative(
 	// the reduced role set fails closed rather than defaulting to all-visible
 	// (TKT-73C6B2 / RR — the role-resolution leak).
 	var attrs []acl.RoleAttribution
-	if isHistoricalSubject(ctx) {
+	if IsHistoricalSubject(ctx) {
 		attrs = gr.Attributions
 	} else {
 		attrs = req.ForEntity(ctx, e.Type, e.ID)

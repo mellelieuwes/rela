@@ -346,6 +346,28 @@ work item). Until then the SPA continues to render workflow controls
 unconditionally and falls back to the server's 403 on disallowed
 transitions.
 
+### Detail-page actions (`action:<id>`)
+
+A per-item `_actions` map may also carry keys of the form `action:<id>`, one
+per [action with `available_on`](../data-entry.md#actions-on-the-detail-page)
+that the principal may run against this entity at its face. These keys are
+only ever `true`. **Absence means "not offered"**, the opposite of the verb
+keys, because only the server can list which actions apply.
+
+```json
+"_actions": { "update": true, "action:regenerate-soa": true }
+```
+
+`POST /api/v1/_action/<id>` with `{"entity_id": "<ID>@<face>"}` checks the same
+rules before the script runs:
+
+| Status | Error code | When |
+|---|---|---|
+| 403 | `permission_required` | The caller lacks the action's `permission:`. Applies to every action, with or without `available_on` |
+| 404 | `entity_not_found` | No `entity_id`, or the entity does not exist or the caller may not read it at that face |
+| 403 | `action_not_available` | Type, face or `when` does not match |
+| 409 | `config_reloaded` | The configuration was reloaded while the request waited; retry |
+
 ### Always present
 
 Every HTTP response from the data-entry server carries `_actions`.

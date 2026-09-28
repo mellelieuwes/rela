@@ -193,6 +193,8 @@ func rebindApp(app *App, fs storage.FS, paths *project.Context, svc *appbuild.Se
 		getEntity:          app.reader.getEntity,
 		currentEdgesByPeer: app.currentEdgesByPeer,
 		copies:             copyOffers,
+		schema:             app.State,
+		actionConditions:   func() ViewConditionFunc { return app.viewConditions },
 	}
 	app.serializer = entitySerializer{affordances: app.affordances}
 	// viewReader mirrors the production wiring (NewApp) so view-pipeline reads

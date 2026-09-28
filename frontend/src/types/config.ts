@@ -51,7 +51,13 @@ export interface AppEntry {
 export interface ActionConfig {
   label?: string
   key?: string
-  confirm?: boolean
+  /**
+   * `true` asks before running; a string asks with that text (TKT-VVS16W).
+   * Where an action appears on a DETAIL page is decided by the server and
+   * published as `_actions['action:<id>']` on the entity; the scope, `when`
+   * and `permission` that decide it are deliberately not served here.
+   */
+  confirm?: boolean | string
   set?: Record<string, string>
   script?: string
   description?: string

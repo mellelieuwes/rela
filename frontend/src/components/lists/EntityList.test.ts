@@ -279,6 +279,31 @@ describe('EntityList delete integration', () => {
     consoleSpy.mockRestore()
     wrapper.unmount()
   })
+
+  // A string `confirm:` is the dialog text; `true` keeps the default wording
+  // (TKT-VVS16W).
+  it.each([
+    ['string', 'Close these tickets for good?', 'Close these tickets for good?'],
+    ['true', true, 'Apply Close to 1 selected entities?'],
+  ])('bulk action confirm: %s', async (_name, confirm, want) => {
+    const schemaStore = useSchemaStore()
+    const wrapper = await mountList([
+      { ...makeEntity('T-1'), _actions: { update: true } },
+    ])
+    schemaStore.lists.set(listId, { ...schemaStore.getList(listId)!, actions: ['close'] } as never)
+    schemaStore.actions.set('close', { label: 'Close', key: 'c', script: 'c.lua', confirm })
+    await flushPromises()
+
+    await wrapper.find('.select-cell input').setValue(true)
+    const btn = wrapper.findAll('.action-header-btn').find((b) => b.text().includes('Close'))
+    expect(btn).toBeDefined()
+    await btn!.trigger('click')
+    await flushPromises()
+
+    expect(overlay()).not.toBeNull()
+    expect(overlay()!.textContent).toContain(want)
+    wrapper.unmount()
+  })
 })
 
 describe('EntityList search integration', () => {

@@ -6,6 +6,8 @@ import { useScopeNavigation } from '@/composables'
 import { useBackTarget } from '@/composables/useBackTarget'
 import { isCancelledFetch } from '@/composables/usePageData'
 import { fetchView, getCommands, getErrorMessage } from '@/api'
+import { runAction } from '@/api/actions'
+import { useActionFeedback } from '@/composables/useActionFeedback'
 import { useWorld, worldQuery, DEFAULT_WORLD } from '@/composables/useWorld'
 import { entityRef, refBareId, refFace } from '@/utils/entityRef'
 import { worldText, type WorldTextVars } from '@/utils/worldText'
@@ -14,7 +16,7 @@ import type { Entity } from '@/types'
 import { entityDisplayTitle } from '@/utils/entityDisplay'
 import { useAutoSave } from '@/composables/useAutoSave'
 import { toggleCheckboxInSource } from '@/utils/checkboxToggle'
-import type { Command } from '@/types'
+import type { ActionConfig, Command } from '@/types'
 import { getEditFormId } from '@/types'
 import { entityDetailHref } from '@/utils/entityRoute'
 import { shouldDeferToBrowser } from '@/utils/openIntent'
@@ -740,6 +742,64 @@ function runCommand(cmd: Command) {
   commandModalRef.value?.runCommand(cmd)
 }
 
+// Lua actions offered on this page (TKT-VVS16W). The server publishes each
+// as `_actions['action:<id>']` only when type, face, `when` and `permission`
+// all hold, so the page renders exactly the keys it is given and decides
+// nothing itself. Sorted by label so the order does not depend on map order.
+interface DetailAction {
+  id: string
+  label: string
+  config: ActionConfig
+}
+const detailActions = computed<DetailAction[]>(() => {
+  const out: DetailAction[] = []
+  for (const [key, allowed] of Object.entries(entry.value?._actions ?? {})) {
+    if (!allowed || !key.startsWith('action:')) continue
+    const id = key.slice('action:'.length)
+    const config = schemaStore.getAction(id)
+    if (config) out.push({ id, label: config.label || id, config })
+  }
+  return out.sort((a, b) => a.label.localeCompare(b.label))
+})
+const detailActionBusy = ref(false)
+const { reportResult, reportError } = useActionFeedback()
+
+async function runDetailAction(action: DetailAction, ev?: Event) {
+  if (detailActionBusy.value) return
+  const { id, label, config } = action
+  const triggerEl = ev?.currentTarget instanceof HTMLElement ? ev.currentTarget : null
+  if (config.confirm) {
+    const ok = await confirm({
+      title: `${label}?`,
+      message:
+        typeof config.confirm === 'string'
+          ? config.confirm
+          : `Run ${label} on this entity?`,
+      confirmLabel: label,
+    })
+    if (!ok) return
+  }
+  // The served face address, never the bare id: the server checks the face
+  // against `available_on.faces` and hands it to the script as entity.face.
+  const address = servedRef.value
+  detailActionBusy.value = true
+  try {
+    const res = await runAction(id, address)
+    reportResult(res, `${label}: done`)
+    if (res?.redirect) {
+      router.push(res.redirect)
+      return
+    }
+    // The script usually rewrote this entity; show the result without a
+    // manual refresh.
+    await loadView()
+  } catch (err) {
+    reportError(err, triggerEl, label)
+  } finally {
+    detailActionBusy.value = false
+  }
+}
+
 async function loadView() {
   loading.value = true
   error.value = null
@@ -1119,6 +1179,7 @@ const overflowCopies = computed<CopyOffer[]>(() => copyOffers.value.filter((o) =
 const hasOverflow = computed(
   () =>
     commands.value.length > 0 ||
+    detailActions.value.length > 0 ||
     overflowFaces.value.length > 0 ||
     overflowCopies.value.length > 0 ||
     canDuplicate.value ||
@@ -1771,6 +1832,15 @@ function treeContainsEntity(nodes: ViewTreeNode[] | undefined, id: string): bool
           >
             {{ cmd.label }}
           </button>
+          <button
+            v-for="a in detailActions"
+            :key="`action-${a.id}`"
+            class="btn btn-command"
+            :disabled="detailActionBusy"
+            @click="runDetailAction(a, $event)"
+          >
+            {{ a.label }}
+          </button>
           <FaceMenu :faces="faceOptions" @select="goToFace" />
           <!--
             Copy affordances (RULING 9). Renders nothing when no offer is
@@ -1875,6 +1945,15 @@ function treeContainsEntity(nodes: ViewTreeNode[] | undefined, id: string): bool
                 @click="runCommand(cmd)"
               >
                 {{ cmd.label }}
+              </button>
+              <button
+                v-for="a in detailActions"
+                :key="`action-${a.id}`"
+                class="overflow-menu-item"
+                :disabled="detailActionBusy"
+                @click="runDetailAction(a, $event)"
+              >
+                {{ a.label }}
               </button>
               <!--
                 Faces and copies are rendered as flat rows here rather than as

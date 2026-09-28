@@ -20,6 +20,9 @@ type ViewConditionKind string
 const (
 	ViewConditionList   ViewConditionKind = "lists"
 	ViewConditionKanban ViewConditionKind = "kanbans"
+	// ViewConditionAction is an action's `when:` (TKT-VVS16W). Its key ID is
+	// [dataentryconfig.ActionConditionID]: one program per listed type.
+	ViewConditionAction ViewConditionKind = "actions"
 )
 
 // ViewConditionKey identifies one compiled view condition.
@@ -31,7 +34,8 @@ type ViewConditionKey struct {
 // String renders the key the way the config reads, for diagnostics.
 func (k ViewConditionKey) String() string { return fmt.Sprintf("%s[%q]", k.Kind, k.ID) }
 
-// CompileViewConditions compiles the `condition:` of every list and kanban.
+// CompileViewConditions compiles the `condition:` of every list and kanban,
+// and the `when:` of every detail-page action.
 //
 // Like [CompileNextActions] and unlike [Lint], this is AUTHORITATIVE: the
 // programs returned here are the ones evaluated on the read path, so an
@@ -69,12 +73,53 @@ func CompileViewConditions(
 		compileOne(ev, meta, ViewConditionKey{ViewConditionKanban, id},
 			v.EntityType, v.Condition, programs, &problems)
 	}
+	compileActionConditions(ev, meta, cfg, programs, &problems)
 
 	sort.Strings(problems)
 	if len(programs) == 0 {
 		programs = nil
 	}
 	return programs, problems
+}
+
+// compileActionConditions compiles each detail-page action's `when:` once per
+// type in its available_on.
+//
+// `related(...)` is refused. A detail action's when decides one button on one
+// entity, and keeping it a pure check of that entity's own properties keeps
+// the affordance and the POST gate a single cheap evaluation. A traversal
+// would also need the page-level batching list conditions use, for a page of
+// one row.
+func compileActionConditions(
+	ev *predicatefns.Evaluator, meta *metamodel.Metamodel, cfg *dataentryconfig.Config,
+	programs map[ViewConditionKey]*predicate.Program, problems *[]string,
+) {
+	for id, a := range cfg.Actions {
+		if a.When == "" || a.AvailableOn == nil {
+			// A when without available_on is a structural error that
+			// validateActions reports; there is no type to compile against.
+			continue
+		}
+		for _, et := range a.AvailableOn.EntityTypes {
+			if _, ok := meta.GetEntityDef(et); !ok {
+				continue // reported by validateActions
+			}
+			key := ViewConditionKey{ViewConditionAction, dataentryconfig.ActionConditionID(id, et)}
+			prog, err := ev.CompileWithCurrentUser(et, a.When)
+			if err != nil {
+				*problems = append(*problems, fmt.Sprintf(
+					"actions[%q]: when does not compile against entity type %q: %v", id, et, err))
+				continue
+			}
+			if len(prog.Traversals()) > 0 {
+				*problems = append(*problems, fmt.Sprintf(
+					"actions[%q]: %s(...) is not available in an action's when; it may only "+
+						"test the entity's own properties", id, predicate.FuncRelated))
+				continue
+			}
+			programs[key] = prog
+		}
+	}
 }
 
 // ViewConditionMatcher evaluates one view's compiled condition against a row.
@@ -125,6 +170,10 @@ func (m *ViewConditionMatcher) MatchesWith(
 // traversals for a batch of rows before evaluating them.
 func (m *ViewConditionMatcher) Program() *predicate.Program { return m.prog }
 
+// EntityAttributes returns the entity fields the condition reads. The
+// compiler rejects dynamic attribute access, so the set is complete.
+func (m *ViewConditionMatcher) EntityAttributes() []string { return m.prog.Attributes("entity") }
+
 // EntityType returns the entity type the condition was compiled against.
 func (m *ViewConditionMatcher) EntityType() string { return m.entityType }
 
@@ -166,6 +215,9 @@ func entityTypeFor(cfg *dataentryconfig.Config, key ViewConditionKey) string {
 		return cfg.Lists[key.ID].EntityType
 	case ViewConditionKanban:
 		return cfg.Kanbans[key.ID].EntityType
+	case ViewConditionAction:
+		_, et, _ := dataentryconfig.SplitActionConditionID(key.ID)
+		return et
 	}
 	return ""
 }

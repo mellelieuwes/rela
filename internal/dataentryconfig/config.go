@@ -5,6 +5,8 @@
 package dataentryconfig
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -186,15 +188,48 @@ func (d *DuplicateConfig) CarriesProperty(name string) bool {
 // An action has either a declarative property mutation (Set) or a Lua script
 // (Script), but not both. When referenced by a list's Actions field, the
 // action is available as a keyboard-driven bulk operation on selected rows.
-// When referenced by a navigation entry, it appears as a sidebar button.
+// When referenced by a navigation entry, it appears as a sidebar button. With
+// AvailableOn set, it appears on matching entity detail pages instead.
 type Action struct {
 	Description string            `yaml:"description,omitempty" json:"description,omitempty"`
 	Script      string            `yaml:"script,omitempty" json:"script,omitempty"`
 	Params      map[string]string `yaml:"params,omitempty" json:"params,omitempty"`
 	Label       string            `yaml:"label,omitempty" json:"label,omitempty"`
 	Key         string            `yaml:"key,omitempty" json:"key,omitempty"`
-	Confirm     bool              `yaml:"confirm,omitempty" json:"confirm,omitempty"`
+	Confirm     ActionConfirm     `yaml:"confirm,omitempty" json:"confirm,omitzero"`
 	Set         map[string]string `yaml:"set,omitempty" json:"set,omitempty"`
+
+	// AvailableOn offers the action on entity detail pages (TKT-VVS16W). Nil
+	// means no detail page, which is the behavior before the key existed.
+	//
+	// Setting it makes the action ENTITY-BOUND: every invocation must name a
+	// readable entity at an explicit address, and that entity must match the
+	// scope, When and Permission. Referencing such an action from a list, a
+	// navigation entry or a next-action offer is therefore a config error
+	// (validateActions): none of those sends an address that can pass.
+	//
+	// AvailableOn, When and Permission are not serialized: the server decides
+	// visibility and publishes the verdict as `_actions["action:<id>"]`, so
+	// the SPA has nothing to evaluate. They are config, not secrets; the
+	// omission keeps the client from growing its own evaluator.
+	AvailableOn *ActionScope `yaml:"available_on,omitempty" json:"-"`
+
+	// When is a predicate expression (the condition language of list
+	// `condition:`) that the entity must satisfy for a detail-page action.
+	// It is evaluated against the entity as the caller may see it, after
+	// field redaction, so a hidden property reads as unset. Requires
+	// AvailableOn; `related(...)` is refused at load.
+	When string `yaml:"when,omitempty" json:"-"`
+
+	// Permission names a global ACL permission the caller must hold to run
+	// this action, on every surface. Empty means no permission check, which
+	// is the behavior before the key existed.
+	//
+	// An INTENT gate, like a document's `permission:`, not the write
+	// boundary: it is answered by the request read gate, which holds every
+	// permission when no acl.yaml is configured and under --read-only. The
+	// script's writes stay bounded by the caller's own ACL in either case.
+	Permission string `yaml:"permission,omitempty" json:"-"`
 
 	// Capabilities declares which ambient capabilities this action's script
 	// may reach — http, ai, mail, write_file, and named secrets (TKT-YH52OM,
@@ -226,6 +261,94 @@ type Action struct {
 	// action's execution contract, not an affordance the SPA renders.
 	Request *ActionRequest `yaml:"request,omitempty" json:"-"`
 }
+
+// ActionScope names where an action is offered on entity detail pages.
+type ActionScope struct {
+	// EntityTypes are the types whose detail page offers the action.
+	// Required, and each must be declared in the metamodel.
+	EntityTypes []string `yaml:"entity_types"`
+	// Faces narrows the offer to these content states. Empty means every
+	// face, including the bare state of a faceless type. Each face must be
+	// declared on every listed type.
+	Faces []string `yaml:"faces,omitempty"`
+}
+
+// ActionConditionID names the compiled `when:` of one action for one entity
+// type. An action may list several types and compiles once per type, so the
+// action id alone does not identify a program.
+//
+// The separator cannot occur in an action id (validateActions allows only
+// [a-z0-9_-]), so [SplitActionConditionID] recovers both halves exactly.
+func ActionConditionID(actionID, entityType string) string {
+	return actionID + ":" + entityType
+}
+
+// SplitActionConditionID reverses [ActionConditionID].
+func SplitActionConditionID(id string) (actionID, entityType string, ok bool) {
+	return strings.Cut(id, ":")
+}
+
+// ActionConfirm is an action's `confirm:` value: a boolean, or the text to
+// show in the confirmation dialog. A non-empty string implies confirmation;
+// an empty string means none.
+type ActionConfirm struct {
+	Enabled bool
+	Text    string
+}
+
+// UnmarshalYAML accepts `confirm: true|false` and `confirm: "text"`.
+func (c *ActionConfirm) UnmarshalYAML(value *yaml.Node) error {
+	var b bool
+	if value.Tag == "!!bool" {
+		if err := value.Decode(&b); err != nil {
+			return err
+		}
+		*c = ActionConfirm{Enabled: b}
+		return nil
+	}
+	if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+		return errors.New("confirm must be a boolean or a string")
+	}
+	// YAML 1.2 reads an unquoted yes/no/on/off as a string, so `confirm: yes`
+	// would silently become the dialog text "yes". Refuse it; a quoted value
+	// is taken as the text the operator meant.
+	if value.Style&(yaml.DoubleQuotedStyle|yaml.SingleQuotedStyle) == 0 && isYAML11Bool(value.Value) {
+		return fmt.Errorf("confirm: %q is not a boolean; use true or false, or quote it to show it as text",
+			value.Value)
+	}
+	*c = ActionConfirm{Enabled: value.Value != "", Text: value.Value}
+	return nil
+}
+
+// isYAML11Bool reports whether s is one of the YAML 1.1 boolean spellings
+// that YAML 1.2 reads as a plain string.
+func isYAML11Bool(s string) bool {
+	switch strings.ToLower(s) {
+	case "yes", "no", "y", "n", "on", "off":
+		return true
+	}
+	return false
+}
+
+// MarshalYAML writes the same shape UnmarshalYAML reads.
+func (c ActionConfirm) MarshalYAML() (any, error) {
+	if c.Text != "" {
+		return c.Text, nil
+	}
+	return c.Enabled, nil
+}
+
+// MarshalJSON serves the text when there is one and a boolean otherwise, so a
+// client that only knows the boolean form still reads a string as "confirm".
+func (c ActionConfirm) MarshalJSON() ([]byte, error) {
+	if c.Text != "" {
+		return json.Marshal(c.Text)
+	}
+	return json.Marshal(c.Enabled)
+}
+
+// IsZero reports whether no confirmation is configured.
+func (c ActionConfirm) IsZero() bool { return !c.Enabled && c.Text == "" }
 
 // ActionRequest declares which parts of the inbound HTTP request an action's
 // script may see (TKT-EFMRQM). Everything is opt-in and off by default.

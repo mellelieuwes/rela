@@ -51,6 +51,16 @@ Rules for new write code here:
 - **Phase 1 verbs:** `create` (per-collection), `update`/`delete`/`rename`
   (per-item). `transition:*` and `relation:*` are deferred until ACL gains
   Op variants or extension fields.
+- **`action:<id>` keys are detail-page actions (TKT-VVS16W), not verbs.** They
+  ride per-entity responses only and are emitted ONLY as `true`: absence means
+  "not offered", the opposite of a verb's render-when-absent default, because
+  the set is open and only the server can enumerate it. The key and the
+  `POST /_action/{id}` gate call one function,
+  `detailActionCheck.Allows`; keep it that way.
+  `TestDetailAction_AffordanceAndGateAgree` pins that a missing key is a
+  refused POST and a present one runs. `when:` is judged on the REDACTED
+  entity; judging the raw one turns the button into an oracle on a hidden
+  field.
 
 Rules for new write affordances in the Vue SPA (`frontend/`):
 

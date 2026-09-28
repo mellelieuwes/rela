@@ -608,6 +608,11 @@ func (h *writeHandler) handleV1DryRunCreate(w http.ResponseWriter, r *http.Reque
 	// re-derive as the form changes. includeRelations=false: no edges
 	// exist for an unsaved entity.
 	result := h.serializer.forWire(r.Context(), candidate, nil, h.schema().Meta, plural)
+	// An unsaved candidate has nothing an action could run against, so it
+	// carries no detail-action keys (TKT-VVS16W).
+	maps.DeleteFunc(result.Actions, func(k string, _ bool) bool {
+		return strings.HasPrefix(k, detailActionKeyPrefix)
+	})
 	// A create ENTERS the machine at its initial state; it is not a transition.
 	// Lock every state-machine field to its entry value so the create form
 	// renders it read-only at the initial state (BUG-X1C7S / TKT-3G93B8).

@@ -266,9 +266,11 @@ func validateNextActionOffer(where string, i int, o NextActionOffer, cfg *Config
 	}
 
 	if o.Action != "" {
-		if _, ok := cfg.Actions[o.Action]; !ok {
+		if a, ok := cfg.Actions[o.Action]; !ok {
 			errs = append(errs, fmt.Sprintf(
 				"%s: references unknown action %q", at, o.Action))
+		} else if a.AvailableOn != nil {
+			errs = append(errs, entityBoundActionRefError(at, o.Action))
 		}
 	}
 
@@ -304,9 +306,11 @@ func validatePickOne(at string, p NextActionPickOne, cfg *Config) []string {
 	}
 	if p.Action == "" {
 		errs = append(errs, at+": pick_one needs an action to run on the chosen option")
-	} else if _, ok := cfg.Actions[p.Action]; !ok {
+	} else if a, ok := cfg.Actions[p.Action]; !ok {
 		errs = append(errs, fmt.Sprintf(
 			"%s: pick_one references unknown action %q", at, p.Action))
+	} else if a.AvailableOn != nil {
+		errs = append(errs, entityBoundActionRefError(at+": pick_one", p.Action))
 	}
 	// A negative limit is a typo, not a request for the default: silently
 	// treating it as "3" would hide the mistake.

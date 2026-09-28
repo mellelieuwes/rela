@@ -342,14 +342,7 @@ type commandProjectInfo struct {
 // uniform not-found, so a denied face stays indistinguishable from an absent
 // one (the row-level rule).
 func (h *commandHandler) entityReadable(ctx context.Context, e *entity.Entity) bool {
-	if worldFromContext(ctx).blocksAllReads() {
-		return false
-	}
-	ok, err := readGateFromContext(ctx).PermitsRead(ctx, e.Type, e.ID)
-	if err != nil || !ok {
-		return false
-	}
-	return faceReadable(ctx, e.Type, e.Face)
+	return entityReadableInRequest(ctx, e)
 }
 
 // redactEntity applies field-level `visible:` redaction to an entity bound for

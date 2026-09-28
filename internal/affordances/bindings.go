@@ -80,7 +80,7 @@ type bindingContext struct {
 // the field fails CLOSED (TKT-73C6B2). Not consulting the store also avoids a
 // misleading live lookup on a since-deleted or drifted id.
 func (bc *bindingContext) outgoingCounts(ctx context.Context) map[string]int {
-	if isHistoricalSubject(ctx) {
+	if IsHistoricalSubject(ctx) {
 		return nil
 	}
 	if !bc.outgoingReady {

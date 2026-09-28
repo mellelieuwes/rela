@@ -1007,6 +1007,8 @@ func NewApp(
 		getEntity:          app.reader.getEntity,
 		currentEdgesByPeer: app.currentEdgesByPeer,
 		copies:             copyOffers,
+		schema:             app.State,
+		actionConditions:   func() ViewConditionFunc { return app.viewConditions },
 	}
 
 	app.serializer = entitySerializer{affordances: app.affordances}

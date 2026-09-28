@@ -74,6 +74,9 @@ type ViewConditionFunc func(
 const (
 	viewKindList   = "lists"
 	viewKindKanban = "kanbans"
+	// viewKindAction is a detail action's `when:` (TKT-VVS16W), keyed by
+	// dataentryconfig.ActionConditionID.
+	viewKindAction = "actions"
 
 	// listIDParam names which configured list a generic collection read is
 	// serving, so the server can apply that list's condition. Absent means

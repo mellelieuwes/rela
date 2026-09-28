@@ -113,7 +113,7 @@ func (r *PolicyResolver) PrimeTraversals(ctx context.Context, rows []*entity.Ent
 // closed direction.
 func (r *PolicyResolver) traversalFor(ctx context.Context, e *entity.Entity) (predicate.TraversalFunc, error) {
 	switch {
-	case isHistoricalSubject(ctx):
+	case IsHistoricalSubject(ctx):
 		return nil, fmt.Errorf("%w: historical subject", errNotAnswerable)
 	case e.Face != "":
 		return nil, fmt.Errorf("%w: face %q", errNotAnswerable, e.Face)

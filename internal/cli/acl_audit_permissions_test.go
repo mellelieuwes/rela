@@ -72,6 +72,15 @@ commands:
     permission: report:sales
 `,
 		},
+		{
+			name: "action",
+			yaml: `
+actions:
+  regenerate-sales:
+    script: regenerate.lua
+    permission: report:sales
+`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

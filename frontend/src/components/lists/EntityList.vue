@@ -198,7 +198,10 @@ async function requestActionConfirm(
 ) {
   const ok = await confirm({
     title: `${action.label}?`,
-    message: `Apply ${action.label} to ${selectedIds.value.size} selected entities?`,
+    message:
+      typeof action.confirm === 'string'
+        ? action.confirm
+        : `Apply ${action.label} to ${selectedIds.value.size} selected entities?`,
     confirmLabel: action.label,
   })
   if (!ok) return

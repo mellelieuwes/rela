@@ -37,8 +37,8 @@ func WithHistoricalSubject(ctx context.Context) context.Context {
 	return context.WithValue(ctx, historicalSubjectKey{}, true)
 }
 
-// isHistoricalSubject reports whether ctx was marked by [WithHistoricalSubject].
-func isHistoricalSubject(ctx context.Context) bool {
+// IsHistoricalSubject reports whether ctx was marked by [WithHistoricalSubject].
+func IsHistoricalSubject(ctx context.Context) bool {
 	v, _ := ctx.Value(historicalSubjectKey{}).(bool)
 	return v
 }

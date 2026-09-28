@@ -15,11 +15,8 @@ import { computed, onMounted, onUnmounted, ref, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { useNextAction } from '@/composables/useNextAction'
 import { runAction } from '@/api/actions'
-import { getScriptError } from '@/api/errors'
-import { ApiError, getErrorMessage } from '@/api'
 import { useConfirm } from '@/composables/useConfirm'
-import { useUIStore } from '@/stores'
-import { useScriptErrorStore } from '@/stores/scriptError'
+import { useActionFeedback } from '@/composables/useActionFeedback'
 import type { NextActionOffer, NextActionPickOption } from '@/types'
 
 const props = defineProps<{
@@ -56,8 +53,7 @@ function optionsFor(index: number): NextActionPickOption[] {
 const { busy, acting, respond, acknowledge, reload } = useNextAction()
 const router = useRouter()
 const { confirm } = useConfirm()
-const uiStore = useUIStore()
-const scriptErrorStore = useScriptErrorStore()
+const { reportResult, reportError } = useActionFeedback()
 
 // Whether this instance is still mounted. A redirect must not fire from a
 // component the user has already navigated away from: `runAction` and
@@ -99,16 +95,7 @@ async function act(offer: NextActionOffer, triggerEl: HTMLElement | null) {
     // No entity type: the server reads it off the stored row and deliberately
     // ignores a caller-supplied one (actions_request.go, BUG-ZWTDH9).
     const res = await runAction(offer.action, props.entityId)
-    if (res?.message) {
-      // The enum is validated server-side against exactly these four names
-      // (script/action.go), which are the store's methods.
-      const kind = res.message_type ?? 'success'
-      uiStore[kind](res.message)
-    } else if (!res?.redirect) {
-      // Only when the script said nothing at all: a redirect IS the feedback,
-      // and a toast that outlives the page it described is noise.
-      uiStore.success(`${label}: done`)
-    }
+    reportResult(res, `${label}: done`)
     // The suggestion was resolved BY acting, so re-ask rather than leave a
     // banner recommending work that is now done.
     await reload()
@@ -116,17 +103,7 @@ async function act(offer: NextActionOffer, triggerEl: HTMLElement | null) {
     // and only if this instance still exists — see `alive`.
     if (res?.redirect && alive) router.push(res.redirect)
   } catch (err) {
-    // Same precedence as the sidebar's action: a script error opens the
-    // dialog with file:line and correlation id; anything else is a toast
-    // CARRYING the correlation id, which is the only handle on the server log.
-    const scriptErr = getScriptError(err)
-    if (scriptErr) {
-      scriptErrorStore.show(scriptErr, triggerEl)
-    } else {
-      const corrID = err instanceof ApiError ? err.correlationId : undefined
-      const msg = `${label}: ${getErrorMessage(err, 'Action failed')}`
-      uiStore.error(corrID ? `${msg} (ref: ${corrID})` : msg)
-    }
+    reportError(err, triggerEl, label)
   } finally {
     acting.value = false
   }
