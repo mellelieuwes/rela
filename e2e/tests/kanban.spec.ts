@@ -118,15 +118,28 @@ test.describe('Kanban Board', () => {
       const kanbanPage = new KanbanPage(appPage);
 
       await kanbanPage.navigateToKanban('feature-board');
+      await expect(kanbanPage.cards.filter({ hasText: 'Dashboard Analytics' })).toBeVisible();
 
-      const initialCardCount = await kanbanPage.getCardCount();
-
-      // Filter by priority
+      // Only FEAT-001 (User Authentication) has priority high.
       await kanbanPage.setFilter('Priority', 'high');
 
-      // Should show fewer cards
-      const filteredCardCount = await kanbanPage.getCardCount();
-      expect(filteredCardCount).toBeLessThanOrEqual(initialCardCount);
+      await expect(kanbanPage.cards.filter({ hasText: 'User Authentication' })).toBeVisible();
+      await expect(kanbanPage.cards.filter({ hasText: 'Dashboard Analytics' })).toHaveCount(0);
+    });
+
+    test('can filter cards by relation', async ({ appPage }) => {
+      const kanbanPage = new KanbanPage(appPage);
+
+      await kanbanPage.navigateToKanban('feature-board');
+      await expect(kanbanPage.cards.filter({ hasText: 'Dashboard Analytics' })).toBeVisible();
+
+      // Only FEAT-001 blocks FEAT-003 (Export Data). The control's options are
+      // the relation's targets; the board used to ignore relation controls.
+      await kanbanPage.setFilter('Blocks', 'Export Data');
+
+      await expect(kanbanPage.cards.filter({ hasText: 'User Authentication' })).toBeVisible();
+      await expect(kanbanPage.cards.filter({ hasText: 'Dashboard Analytics' })).toHaveCount(0);
+      await expect(appPage).toHaveURL(/filter%5Bblocks%5D|filter\[blocks\]/);
     });
   });
 

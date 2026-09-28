@@ -470,6 +470,17 @@ func TestConfigRelationFilterDirection(t *testing.T) {
 				FilterControls: []FilterControl{{Relation: "verantwoordelijk_voor"}},
 			},
 		},
+		// A board fetches through the list endpoint too: its controls count,
+		// after every list (BUG-GEMNW6).
+		Kanbans: map[string]Kanban{
+			"bord": {
+				EntityType: "taak",
+				FilterControls: []FilterControl{
+					{Relation: "toegewezen_aan", Direction: DirectionIncoming},
+					{Relation: "belongs_to", Direction: DirectionIncoming}, // conflicts with the list
+				},
+			},
+		},
 	}
 
 	tests := []struct {
@@ -482,6 +493,7 @@ func TestConfigRelationFilterDirection(t *testing.T) {
 		{"incoming resolves", "taak", "verantwoordelijk_voor", DirectionIncoming, true},
 		{"outgoing default resolves", "taak", "belongs_to", DirectionOutgoing, true},
 		{"other entity type isolated", "persoon", "verantwoordelijk_voor", DirectionOutgoing, true},
+		{"control only on a kanban resolves", "taak", "toegewezen_aan", DirectionIncoming, true},
 		{"unknown relation for type", "taak", "missing", DirectionOutgoing, false},
 		{"unknown entity type", "widget", "belongs_to", DirectionOutgoing, false},
 	}

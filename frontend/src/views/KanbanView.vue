@@ -15,10 +15,14 @@ import type {
   ListParams,
 } from '@/types'
 import { viewHeaderMarkdown, viewFooterMarkdown } from '@/types'
+import type { FilterState } from '@/types/filters'
+import FilterBar from '@/components/lists/FilterBar.vue'
 import BackButton from '@/components/common/BackButton.vue'
 import { useBackTarget } from '@/composables/useBackTarget'
+import { useUrlFilterSync } from '@/composables/useUrlFilterSync'
 import { useWorld } from '@/composables/useWorld'
 import { actionAllowed } from '@/utils/affordancesWarning'
+import { filterStateToApiParams } from '@/utils/filters'
 import { entityRef } from '@/utils/entityRef'
 import { worldText } from '@/utils/worldText'
 import { entityDisplayTitle } from '@/utils/entityDisplay'
@@ -44,7 +48,6 @@ const queryCache = useQueryCache()
 const backTarget = useBackTarget()
 
 // State
-const filterValues = ref<Record<string, string>>({})
 const draggedCard = ref<Entity | null>(null)
 
 // The selected world (`?world=`). A board is a projection through a world
@@ -101,6 +104,19 @@ const projectionNote = computed<string>(() => {
 // Computed
 const kanbanConfig = computed(() => schemaStore.getKanban(props.id) as KanbanConfig | undefined)
 
+// The board's filter controls are the list's: the same FilterBar, the same
+// URL sync, and the same server-side `filter[...]` params, so a relation
+// control (whose options are the relation's targets) works on a board exactly
+// as on a list. The board used to filter client-side on
+// `entity.properties[control.property]`, which silently ignored every
+// `relation:` control. Properties pinned by the board's static `filters:`
+// cannot be overridden from the URL, as on a list. Declared after
+// kanbanConfig: useUrlFilterSync reads staticFilterProperties during setup.
+const { filters, writeToQuery } = useUrlFilterSync({
+  staticFilterProperties: () =>
+    new Set((kanbanConfig.value?.filters ?? []).map((f) => f.property)),
+})
+
 // Cards may render relation targets by ID; when any card field references a
 // relation we must ask the server to embed the related entities (?include=*)
 // so we can resolve those IDs to titles. Property-only boards fetch without
@@ -127,8 +143,14 @@ const boardParams = computed<ListParams | undefined>(() => {
   // See the same attachment in EntityList: the board's configured scope has to
   // travel on the request, since the endpoint is keyed by type.
   if (kanbanConfig.value?.query_scope) params.query_scope = kanbanConfig.value.query_scope
+  // The user's filter controls, serialized exactly as EntityList does. They
+  // are part of the params, so each filter state is its own cache entry.
+  Object.assign(params, filterStateToApiParams(filters.value))
   return Object.keys(params).length ? params : undefined
 })
+
+// The board whose data the query last resolved; see placeholderData below.
+let heldBoardId: string | undefined
 
 const boardQuery = useQuery({
   // listParams, not the param-free `list`: the world has to separate cache
@@ -138,12 +160,20 @@ const boardQuery = useQuery({
   // The signal matters more here than on single-fetch queries: when a
   // refetch supersedes this call (drag-drop settle, SSE echo), it also
   // cancels the remaining page fetches of the superseded loop.
-  query: ({ signal }) => {
+  query: async ({ signal }) => {
     const config = kanbanConfig.value
     if (!config) throw new Error(`unknown kanban view: ${props.id}`)
-    return listAllEntities(config.entity, boardParams.value, signal)
+    const boardId = props.id
+    const result = await listAllEntities(config.entity, boardParams.value, signal)
+    heldBoardId = boardId
+    return result
   },
   enabled: () => !!kanbanConfig.value,
+  // A filter change is a new key, which would start out pending and blank the
+  // board while every page reloads. Hold the previous cards instead, as
+  // EntityList does — but only for the same board: this view is reused across
+  // boards, and another board's cards must not appear under this one's columns.
+  placeholderData: (prev) => (heldBoardId === props.id ? prev : undefined),
 })
 
 const entities = computed(() => boardQuery.data.value?.data ?? [])
@@ -240,13 +270,6 @@ const filteredEntities = computed(() => {
             return true
         }
       })
-    }
-  }
-
-  // Apply user filter controls
-  for (const [prop, value] of Object.entries(filterValues.value)) {
-    if (value) {
-      result = result.filter((entity) => String(entity.properties[prop] || '') === value)
     }
   }
 
@@ -361,25 +384,6 @@ const swimlaneGridStyle = computed(() => {
   return {
     gridTemplateColumns: `auto repeat(${colCount}, minmax(240px, 1fr))`,
   }
-})
-
-const filterOptions = computed(() => {
-  const options: Record<string, string[]> = {}
-
-  if (!kanbanConfig.value?.filter_controls) return options
-
-  for (const control of kanbanConfig.value.filter_controls) {
-    if (control.property) {
-      const values = new Set<string>()
-      for (const entity of entities.value) {
-        const val = String(entity.properties[control.property] || '')
-        if (val) values.add(val)
-      }
-      options[control.property] = Array.from(values).sort()
-    }
-  }
-
-  return options
 })
 
 // Drag-drop write path: optimistic copy-on-write against the query
@@ -670,22 +674,13 @@ function createNew() {
       </span>
     </div>
 
-    <!-- Filter controls -->
-    <div v-if="kanbanConfig?.filter_controls?.length" class="filter-bar">
-      <div v-for="control in kanbanConfig.filter_controls" :key="control.property" class="filter-group">
-        <label>{{ control.label || control.property }}</label>
-        <select v-model="filterValues[control.property || '']">
-          <option value="">All</option>
-          <option
-            v-for="opt in filterOptions[control.property || '']"
-            :key="opt"
-            :value="opt"
-          >
-            {{ opt }}
-          </option>
-        </select>
-      </div>
-    </div>
+    <FilterBar
+      v-if="kanbanConfig?.filter_controls?.length"
+      :config="kanbanConfig"
+      :entity-type="entityType"
+      :filters="filters"
+      @filter="(f: FilterState) => writeToQuery(f)"
+    />
 
     <!-- eslint-disable-next-line vue/no-v-html -- sanitized by renderMarkdown -->
     <div v-if="headerHtml" class="view-info view-info--top" v-html="headerHtml"/>
@@ -917,36 +912,10 @@ function createNew() {
   background: #4f46e5;
 }
 
+/* The board renders the list's FilterBar, whose bottom border separates the
+   filters from a list's table. A board has no table to separate from. */
 .filter-bar {
-  display: flex;
-  gap: var(--space-lg);
-  margin-bottom: 20px;
-  padding: 12px 16px;
-  background: var(--card-bg);
-  border-radius: var(--radius-lg);
-}
-
-.filter-group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2xs);
-}
-
-.filter-group label {
-  font-size: var(--font-size-sm);
-  font-weight: 500;
-  color: var(--muted-text);
-  text-transform: uppercase;
-}
-
-.filter-group select {
-  padding: 6px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-base);
-  min-width: 120px;
-  background: var(--input-bg);
-  color: var(--text-color);
+  border-bottom: none;
 }
 
 .truncation-banner {

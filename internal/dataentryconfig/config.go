@@ -963,27 +963,63 @@ func (fc FilterControl) CurrentValue(query url.Values) string {
 	return query.Get(fc.QueryParamKey())
 }
 
+// filterControlSource is one screen whose filter controls feed the shared
+// list pipeline: a list, or a kanban (a board fetches its cards through the
+// same list endpoint and sends its filters as `filter[...]` params). Kind is
+// "list" or "kanban", for messages.
+type filterControlSource struct {
+	Kind       string
+	ID         string
+	EntityType string
+	Controls   []FilterControl
+}
+
+// filterControlSources returns every list, then every kanban, each in sorted
+// ID order, so every resolver and warning over filter controls sees the same
+// deterministic order: a list wins over a kanban, and a lower ID over a
+// higher one (RR-9MJRJG). Before kanbans were included, a relation control
+// that only a board configured was not recognized by the list endpoint, so
+// the board's relation filter matched nothing (BUG-GEMNW6).
+func (c *Config) filterControlSources() []filterControlSource {
+	sources := make([]filterControlSource, 0, len(c.Lists)+len(c.Kanbans))
+	for _, id := range sortedListIDs(c) {
+		list := c.Lists[id]
+		sources = append(sources, filterControlSource{
+			Kind: "list", ID: id, EntityType: list.EntityType, Controls: list.FilterControls,
+		})
+	}
+	kanbanIDs := make([]string, 0, len(c.Kanbans))
+	for id := range c.Kanbans {
+		kanbanIDs = append(kanbanIDs, id)
+	}
+	sort.Strings(kanbanIDs)
+	for _, id := range kanbanIDs {
+		kanban := c.Kanbans[id]
+		sources = append(sources, filterControlSource{
+			Kind: "kanban", ID: id, EntityType: kanban.EntityType, Controls: kanban.FilterControls,
+		})
+	}
+	return sources
+}
+
 // RelationFilterDirection returns the configured Direction for a relation
-// filter control keyed by relation on any list of the given entity type. It
-// scans every list whose EntityType matches, returning the matching
-// FilterControl's direction. Returns (DirectionOutgoing, false) when no such
-// filter control is configured — callers use the `ok` return to decide whether
-// a relation filter applies at all (RR-B0JPPL: a relation filter only applies
-// when a control configures it).
+// filter control keyed by relation on any list or kanban of the given entity
+// type. Returns (DirectionOutgoing, false) when no such filter control is
+// configured — callers use the `ok` return to decide whether a relation
+// filter applies at all (RR-B0JPPL: a relation filter only applies when a
+// control configures it).
 //
-// Lowest-list-ID wins: Config.Lists is a map, so iterating it directly would
-// randomize which list's direction wins when two lists of the same entity type
-// configure the same relation with conflicting directions (RR-9MJRJG). We
-// iterate list IDs in sorted order so the answer is deterministic per process.
-// CollectConfigWarnings surfaces conflicting directions at load time; this
-// resolver just needs a stable answer.
+// The first source in filterControlSources order wins, so the answer is
+// deterministic when two screens of the same entity type configure the same
+// relation with conflicting directions (RR-9MJRJG). CollectConfigWarnings
+// surfaces such conflicts at load time; this resolver just needs a stable
+// answer.
 func (c *Config) RelationFilterDirection(entityType, relation string) (Direction, bool) {
-	for _, listID := range sortedListIDs(c) {
-		list := c.Lists[listID]
-		if list.EntityType != entityType {
+	for _, src := range c.filterControlSources() {
+		if src.EntityType != entityType {
 			continue
 		}
-		for _, fc := range list.FilterControls {
+		for _, fc := range src.Controls {
 			if fc.Relation == relation {
 				// Normalize the empty (unset) YAML value to the outgoing
 				// default so callers get a concrete direction.
@@ -997,18 +1033,17 @@ func (c *Config) RelationFilterDirection(entityType, relation string) (Direction
 	return DirectionOutgoing, false
 }
 
-// HasPropertyFilterControl reports whether any list of the given entity type
-// declares a property (non-relation) filter control for the named property.
-// Used by the list pipeline to resolve a property/relation name collision in
-// favor of the property when the config explicitly configures it as a property
-// filter (RR-0HWAS0).
+// HasPropertyFilterControl reports whether any list or kanban of the given
+// entity type declares a property (non-relation) filter control for the named
+// property. Used by the list pipeline to resolve a property/relation name
+// collision in favor of the property when the config explicitly configures it
+// as a property filter (RR-0HWAS0).
 func (c *Config) HasPropertyFilterControl(entityType, property string) bool {
-	for _, listID := range sortedListIDs(c) {
-		list := c.Lists[listID]
-		if list.EntityType != entityType {
+	for _, src := range c.filterControlSources() {
+		if src.EntityType != entityType {
 			continue
 		}
-		for _, fc := range list.FilterControls {
+		for _, fc := range src.Controls {
 			if !fc.IsRelation() && fc.Property == property {
 				return true
 			}

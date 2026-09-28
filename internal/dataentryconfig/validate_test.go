@@ -2691,6 +2691,38 @@ func TestCollectConfigWarnings_ConflictingRelationDirections(t *testing.T) {
 			}
 		}
 	})
+
+	// A board's controls take part in the resolution (BUG-GEMNW6), so a board
+	// disagreeing with a list is ignored at runtime and must be reported; the
+	// list wins.
+	t.Run("a kanban conflicting with a list warns and the list wins", func(t *testing.T) {
+		cfg := &Config{
+			Lists: map[string]List{
+				"categories": {
+					EntityType:     "category",
+					FilterControls: []FilterControl{{Relation: "belongs-to", Direction: DirectionIncoming}},
+				},
+			},
+			Kanbans: map[string]Kanban{
+				"board": {
+					EntityType:     "category",
+					FilterControls: []FilterControl{{Relation: "belongs-to", Direction: DirectionOutgoing}},
+				},
+			},
+		}
+		found := false
+		for _, w := range CollectConfigWarnings(cfg, meta) {
+			if strings.Contains(w, "conflicting directions") &&
+				strings.Contains(w, `list "categories"`) && strings.Contains(w, "kanban board=outgoing") {
+
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected a conflict warning with list categories winning over kanban board, got %v",
+				CollectConfigWarnings(cfg, meta))
+		}
+	})
 }
 
 // TestCollectConfigWarnings_RelationPropertyNameCollision pins RR-0HWAS0: a

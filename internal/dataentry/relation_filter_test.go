@@ -62,8 +62,7 @@ func relationFilterMeta() *metamodel.Metamodel {
 // small graph. Returns the app.
 func relationFilterApp(t *testing.T) *App {
 	t.Helper()
-	meta := relationFilterMeta()
-	cfg := &dataentryconfig.Config{
+	return relationFilterAppWithConfig(t, &dataentryconfig.Config{
 		App: dataentryconfig.AppConfig{Name: "Test"},
 		Lists: map[string]dataentryconfig.List{
 			"taken": {
@@ -75,7 +74,13 @@ func relationFilterApp(t *testing.T) *App {
 				},
 			},
 		},
-	}
+	})
+}
+
+// relationFilterAppWithConfig seeds relationFilterApp's graph under cfg.
+func relationFilterAppWithConfig(t *testing.T, cfg *dataentryconfig.Config) *App {
+	t.Helper()
+	meta := relationFilterMeta()
 
 	f := newFixture()
 	// People
@@ -183,6 +188,33 @@ func TestV1ListRelationFilter(t *testing.T) {
 				t.Errorf("ids = %v, want %v", got, tt.wantIDs)
 			}
 		})
+	}
+}
+
+// TestV1ListRelationFilter_ControlOnKanbanOnly pins BUG-GEMNW6: a board sends
+// its filters to the list endpoint, so a relation control that only a kanban
+// configures must be honored there. Before the fix only list controls were
+// consulted, `filter[belongs_to]` fell through to the property pass, and the
+// board's relation filter matched nothing.
+func TestV1ListRelationFilter_ControlOnKanbanOnly(t *testing.T) {
+	app := relationFilterAppWithConfig(t, &dataentryconfig.Config{
+		App: dataentryconfig.AppConfig{Name: "Test"},
+		Lists: map[string]dataentryconfig.List{
+			"taken": {EntityType: "taak", Title: "Taken"},
+		},
+		Kanbans: map[string]dataentryconfig.Kanban{
+			"bord": {
+				EntityType:     "taak",
+				Title:          "Bord",
+				ColumnProperty: "status",
+				FilterControls: []dataentryconfig.FilterControl{{Relation: "belongs_to"}},
+			},
+		},
+	})
+
+	got := listTaken(t, app, url.Values{"filter[belongs_to]": {"Apollo"}, "sort": {"title"}})
+	if !equalStringSlices(got, []string{"TAAK-001", "TAAK-003"}) {
+		t.Errorf("ids = %v, want [TAAK-001 TAAK-003]", got)
 	}
 }
 

@@ -93,9 +93,10 @@ export class KanbanPage extends BasePage {
     await this.dragCardToColumnLocator(card, targetColumn.locator('.column-cards'));
   }
 
-  async setFilter(property: string, value: string) {
-    const filterGroup = this.filterBar.locator('.filter-group').filter({ hasText: property });
-    await filterGroup.locator('select').selectOption(value);
+  /** Pick a value in the filter control labelled `label` (the board renders
+   *  the list's FilterBar, whose <label for> names each control). */
+  async setFilter(label: string, value: string) {
+    await this.filterBar.getByLabel(label, { exact: true }).selectOption(value);
     await this.waitForSpinnerToDisappear();
   }
 

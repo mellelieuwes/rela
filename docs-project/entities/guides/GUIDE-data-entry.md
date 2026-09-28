@@ -1477,6 +1477,10 @@ incoming` pulls candidates from the relation's source types (`from`); `outgoing`
 is the target's **display title** (honoring each type's `display_property`), not
 its ID.
 
+**Property filter controls** without declared `values:` render as a text box.
+On a `string` property it matches case-insensitively on a substring (`filter[x][contains]`);
+on other types (dates, numbers) it matches the exact value.
+
 Notes:
 
 - Two targets that resolve to the same display title collapse to one option and
@@ -1486,12 +1490,17 @@ Notes:
 - A relation whose name is not a plain identifier (e.g. contains a hyphen)
   cannot be deep-linked as a filter (the URL parser only accepts
   `[a-zA-Z_][a-zA-Z0-9_]*` filter keys).
+- Kanban boards use the same filter controls as lists: the same widgets, the
+  same URL sync, and the same server-side filtering, relation controls
+  included. When two screens of one entity type configure the same relation
+  control with different `direction:`s, lists win over kanbans, then the lowest
+  ID; a load-time warning names the ignored one.
 
 ### URL Sync for Filters
 
 Interactive filter selections are mirrored into the page's URL query string so
-lists are deep-linkable and survive browser back/forward. The format is
-bracketed:
+lists and kanban boards are deep-linkable and survive browser back/forward. The
+format is bracketed:
 
 ```text
 /list/all_tasks?filter[status]=open
