@@ -21,6 +21,7 @@ import { entityDisplayTitle } from '@/utils/entityDisplay'
 import { useSchemaStore } from '@/stores'
 import { useModalStack } from '@/composables/modalStack'
 import { isCancelledFetch } from '@/composables/usePageData'
+import { useWorld } from '@/composables/useWorld'
 import { entityDetailHref } from '@/utils/entityRoute'
 import { shouldDeferToBrowser } from '@/utils/openIntent'
 import type { Entity } from '@/types'
@@ -93,11 +94,13 @@ watch(query, (q) => {
   }, DEBOUNCE_MS)
 })
 
+const { worldParam } = useWorld()
+
 async function runSearch(q: string): Promise<void> {
   abort = new AbortController()
   loading.value = true
   try {
-    const resp = await searchEntities(q, undefined, abort.signal)
+    const resp = await searchEntities(q, undefined, abort.signal, worldParam.value)
     // Replace results only on success — keep stale results visible until
     // the new ones arrive, to avoid flicker.
     results.value = resp.data.slice(0, MAX_RESULTS)

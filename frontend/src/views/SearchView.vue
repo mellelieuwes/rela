@@ -7,6 +7,7 @@ import { parseFilterQueryParams } from '@/utils/filters'
 import { entityDisplayTitle } from '@/utils/entityDisplay'
 import { isInputFocused } from '@/utils/dom'
 import { useBackTarget } from '@/composables/useBackTarget'
+import { useWorld } from '@/composables/useWorld'
 import BackButton from '@/components/common/BackButton.vue'
 import AdHocFilterMenu from '@/components/lists/AdHocFilterMenu.vue'
 import PendingButton from '@/components/common/PendingButton.vue'
@@ -14,6 +15,7 @@ import type { Entity } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
+const { worldParam } = useWorld()
 const schemaStore = useSchemaStore()
 const backTarget = useBackTarget()
 
@@ -131,7 +133,7 @@ async function search() {
   loadError.value = false
 
   try {
-    const response = await searchEntities(searchQuery)
+    const response = await searchEntities(searchQuery, undefined, undefined, worldParam.value)
     results.value = response.data
   } catch (err) {
     console.error('Search error:', err)

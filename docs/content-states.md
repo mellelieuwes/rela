@@ -782,6 +782,8 @@ A world reaches the following routes:
 | `/api/v1/_views/{type}/{id}` | Yes. A view's `where:` clauses evaluate against the resolved face |
 | `/api/v1/_history/{type}/{id}` | Yes. Versioning is per face on PostgreSQL, so the history is the served face's |
 | `/api/v1/_next_action` | Yes, as the display world for `visible_worlds` |
+| `/api/v1/_search` | Yes. The command palette, search page and entity picker send the page's world. Dashboard cards count in the default world |
+| `/api/v1/_position` | Yes. Prev/next within a search or list runs in the same world as the results it steps through |
 | Documents, feeds, analysis, sync, attachments, export, relation sub-resources | No. An explicit `?world=` is refused with `422 world_unsupported` |
 
 A history response names the face it belongs to and how that face was chosen:

@@ -1879,7 +1879,13 @@ func (a *App) handleV1Search(w http.ResponseWriter, r *http.Request) {
 		// {ID, Title} of related entities this principal may not read.
 		// Flipping this requires per-target gating first (RR-QO01XY) —
 		// TestACLSearch_VisibleHitRelatedToHidden pins the invariant.
-		data = append(data, a.serializer.forWireRelated(pageCtx, e, nil, nil, nil, a.Meta(), plural))
+		row := a.serializer.forWireRelated(pageCtx, e, nil, nil, nil, a.Meta(), plural)
+		// Same provenance a list row carries, and nil in the default world
+		// for the same reason (see handleV1ListEntities).
+		if !worldScopeFrom(r.Context()).IsDefaultWorld() {
+			row.World = worldProvenance(r.Context(), e)
+		}
+		data = append(data, row)
 	}
 
 	resp := v1.ListResponse{

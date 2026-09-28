@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useSchemaStore } from '@/stores'
 import NextActionCard from '@/components/NextActionCard.vue'
 import { searchEntities, analyze } from '@/api'
+import { DEFAULT_WORLD } from '@/composables/useWorld'
 import type { Entity, DashboardCard, AnalyzeResult } from '@/types'
 
 const schemaStore = useSchemaStore()
@@ -55,7 +56,11 @@ async function loadData() {
   try {
     // Load card data in parallel
     const cardPromises = cards.value.map(async (card) => {
-      const response = await searchEntities(card.query)
+      // Cards count in the default world, as they did before `_search`
+      // honoured `app.default_world` (BUG-SMPOZB). Counting a card in a
+      // publication world is a separate decision, like next-action's
+      // per-source `source_world:`.
+      const response = await searchEntities(card.query, undefined, undefined, DEFAULT_WORLD)
       cardData.value.set(cardKey(card), {
         entities: response.data,
         count: response.meta.total,

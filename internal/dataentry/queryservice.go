@@ -130,6 +130,12 @@ func (q *queryService) executeQueryPrefiltered(
 	if sq.IsEmpty() {
 		return nil, nil
 	}
+	// A denied handle carries the ZERO scope, which IS the default world, so
+	// both branches below would otherwise search everything under a world the
+	// principal may not read. Same guard as freeTextIDsForType.
+	if worldFromContext(ctx).blocksAllReads() {
+		return []*entity.Entity{}, nil
+	}
 
 	svc := q.services()
 	typeNames := make([]string, 0, len(svc.Meta.Entities))
@@ -215,6 +221,7 @@ func (q *queryService) runVisibleFreeTextSearch(
 		Text:  strings.Join(parts, " "),
 		Types: sq.EntityTypes,
 		Limit: limit,
+		World: worldScopeFrom(ctx),
 	}
 	var hits []search.Hit
 	for hit, err := range searchVisibleHits(ctx, q.visibleSearcher(), q.affordances(), sQuery, scope) {
@@ -230,8 +237,7 @@ func (q *queryService) runVisibleFreeTextSearch(
 	// distinct face rather than one per hit (TKT-1U8XYN). Under the default
 	// world every hit carries the zero face and this is one query. The
 	// searcher already resolved which face matched; a bare-id re-read would
-	// render default-face bytes for a hit scored against another face the
-	// moment /_search stops being world-refused by the route allowlist.
+	// render default-face bytes for a hit scored against another face.
 	loaded, err := loadHitHeaders(ctx, svc.Store, hits)
 	if err != nil {
 		return nil, fmt.Errorf("free-text search: %w", err)

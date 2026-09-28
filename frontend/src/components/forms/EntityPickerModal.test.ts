@@ -154,7 +154,7 @@ describe('EntityPickerModal', () => {
       searchSpy.mockResolvedValueOnce(listResponse([entity]))
       factory()
       await typeQuery('fix')
-      expect(searchSpy).toHaveBeenCalledExactlyOnceWith('fix', undefined, expect.any(AbortSignal))
+      expect(searchSpy).toHaveBeenCalledExactlyOnceWith('fix', undefined, expect.any(AbortSignal), undefined)
       expect(options()).toHaveLength(1)
     })
   })

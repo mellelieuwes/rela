@@ -293,7 +293,7 @@ describe('CommandPaletteModal', () => {
       await flushPromises()
 
       expect(searchSpy).toHaveBeenCalledTimes(1)
-      expect(searchSpy).toHaveBeenLastCalledWith('abcd', undefined, expect.any(AbortSignal))
+      expect(searchSpy).toHaveBeenLastCalledWith('abcd', undefined, expect.any(AbortSignal), undefined)
     })
 
     // Queries below the minimum length, or that contain only whitespace,

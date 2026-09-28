@@ -237,11 +237,11 @@ func resolveWorld(r *http.Request, lookup WorldLookup, configured string) (world
 //
 // Deliberately conservative, and the list has grown deliberately: the
 // collection list (`/{plural}`), the single-entity GET (`/{plural}/{id}`) and
-// exactly three underscore routes named one at a time below — `_views`,
-// `_history` and `_next_action`. Every other underscore endpoint (analyze,
-// documents, feeds, sync, position) is refused, along with every sub-resource
-// of an entity (relations, attachments, export), because each reaches content
-// through a path that is still world-blind.
+// exactly five underscore routes named one at a time below — `_views`,
+// `_history`, `_next_action`, `_search` and `_position`. Every other
+// underscore endpoint (analyze, documents, feeds, sync) is refused, along
+// with every sub-resource of an entity (relations, attachments, export),
+// because each reaches content through a path that is still world-blind.
 //
 // Each admission carries its own justification at the call site rather than a
 // prefix rule, so widening this stays one reviewable edit per route.
@@ -295,6 +295,26 @@ func worldCapablePath(path string) bool {
 	// they were being shown was computed for somewhere else, and an operator
 	// had no way to say "only nag about this while in editorial".
 	if trimmed == "_next_action" {
+		return true
+	}
+	// The FOURTH and FIFTH, named exactly: cross-type search and scope
+	// position (BUG-SMPOZB). Refusing search left `app.default_world`
+	// unapplied there, so the command palette and entity picker could not
+	// find a faced entity that has no default face.
+	//
+	// Every branch of executeQuery takes the world from ctx, behind a
+	// denied-world guard: the free-text search, and the type listing, which
+	// also applies the grant's face allowlist before the world ranks. Hits
+	// load the face the searcher matched. Free-text hits are face-gated
+	// AFTER the world ranks, which can drop an entity whose prime is a
+	// withheld face; that narrows only, and is BUG-OJPVPG.
+	//
+	// `_position` is admitted with search because it recomputes the set a
+	// search or list page showed; in a different world it answered
+	// not_in_scope for the rows the page had just listed. Both of its paths
+	// take the world: the store pushdown (pushdownPlan) and the Go path
+	// through resolveScope.
+	if trimmed == "_search" || trimmed == "_position" {
 		return true
 	}
 	if strings.HasPrefix(trimmed, "_") {

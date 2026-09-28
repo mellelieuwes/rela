@@ -21,6 +21,7 @@ import { entityDisplayTitle } from '@/utils/entityDisplay'
 import { useSchemaStore } from '@/stores'
 import { useModalStack } from '@/composables/modalStack'
 import { isCancelledFetch } from '@/composables/usePageData'
+import { useWorld } from '@/composables/useWorld'
 import type { Entity } from '@/types'
 
 const DEBOUNCE_MS = 150
@@ -86,11 +87,13 @@ watch(query, (q) => {
   }, DEBOUNCE_MS)
 })
 
+const { worldParam } = useWorld()
+
 async function runSearch(q: string): Promise<void> {
   abort = new AbortController()
   loading.value = true
   try {
-    const resp = await searchEntities(q, undefined, abort.signal)
+    const resp = await searchEntities(q, undefined, abort.signal, worldParam.value)
     results.value = resp.data.slice(0, MAX_RESULTS)
     errorMsg.value = ''
     highlightedIndex.value = 0
