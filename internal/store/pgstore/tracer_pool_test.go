@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,7 +19,11 @@ import (
 // log records. Without this, the tracer could be wired wrong and we'd ship
 // one that nobody ever sees.
 func TestQueryTracer_FromPoolEmits(t *testing.T) {
-	var buf bytes.Buffer
+	// A lockedBuffer, not a bytes.Buffer: the store's listener goroutine logs
+	// its startup queries (watermark priming, catch-up) through the same
+	// default logger, possibly after the query below, so the read must
+	// synchronize with it (BUG-1FFUSO).
+	var buf lockedBuffer
 	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	prev := slog.Default()
 	slog.SetDefault(slog.New(h))
@@ -26,12 +31,15 @@ func TestQueryTracer_FromPoolEmits(t *testing.T) {
 
 	st := openWriter(t, freshFeedSchema(t))
 
-	// Drive one query through the store. The exact query doesn't
-	// matter; we only need a pgx round-trip so the tracer fires.
-	_, _ = st.GetEntity(context.Background(), "nonexistent")
+	// Drive one query through the store. The listener's own queries also
+	// log here, so assert on this query's argument, which only it carries.
+	const id = "tracer-pool-probe"
+	_, _ = st.GetEntity(context.Background(), id)
 
-	require.Contains(t, buf.String(), "pgstore: query",
+	out := buf.String()
+	require.Contains(t, out, "pgstore: query",
 		"Open should attach the tracer and queries should emit at Debug")
+	require.Contains(t, out, id, "the store's own query should be traced")
 }
 
 // TestQueryTracer_FromPoolRecordsStats proves per-request accounting
@@ -59,4 +67,22 @@ func TestQueryTracer_FromPoolRecordsStats(t *testing.T) {
 	after := stats.Queries()
 	_, _ = st.GetEntity(context.Background(), "nonexistent")
 	require.Equal(t, after, stats.Queries())
+}
+
+// lockedBuffer is a bytes.Buffer safe for concurrent writes and reads.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
