@@ -3734,10 +3734,11 @@ return {
 }
 ```
 
-Scripts have a 5-second execution timeout (tighter than the default Lua
-timeout because the action handler holds a global write lock for the
-duration — concurrent mutations and other actions wait). Returning
-nothing (or `nil`) produces a silent success response.
+Scripts have the default Lua execution timeout (30 seconds). Actions run
+concurrently with each other and with every other write. Each write a script
+makes is atomic on its own, but a sequence of writes is not: another request
+can change an entity between two of the script's calls. Returning nothing (or
+`nil`) produces a silent success response.
 
 ### Request-scoped actions
 

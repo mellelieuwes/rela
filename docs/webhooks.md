@@ -128,7 +128,8 @@ for the same purpose.
 ## Concurrency: what is and is not guaranteed
 
 The pipeline detects conflicts rather than locking, and retries a bounded number
-of times (4 attempts) before answering `409`.
+of times (8 attempts, with a short random pause between them) before answering
+`409`.
 
 **Be precise about the guarantee you get, because it differs by tier:**
 
@@ -137,22 +138,12 @@ of times (4 attempts) before answering `409`.
 | Concurrent creates, `unique:` declared, **PostgreSQL** | Race-free. The derived unique index is atomic; the loser re-finds and updates. |
 | Concurrent creates, `unique:` declared, fs / sqlite | Safe in practice — those tiers are single-writer — but the uniqueness check is a scan, not a constraint. |
 | Concurrent creates, **no** `unique:` | Can duplicate under concurrent delivery. The vocabulary offers the safety; it does not mandate it. |
-| Concurrent `append_section`, one rela process | Safe. Deliveries serialize on the process write lock and each attempt re-reads. |
-| Concurrent `append_section`, **several rela processes on one database** | **An append can be lost.** Nothing in this path is a compare-and-swap across processes. |
+| Concurrent `append_section`, one or several rela processes | Safe. Each append is a compare-and-swap on the entity's stored version; a delivery that loses re-reads and retries. |
 
-That last row is a real limitation, not a theoretical one — it is reproduced by
-`TestWebhookConflict_CrossProcessAppendsCanBeLost`. If you run multiple
-`rela-server` processes against one PostgreSQL database and rely on
-`append_section`, be aware that a simultaneous delivery to the *same* entity from
-two processes can drop one line. Property `set:` steps are unaffected (they merge
-server-side).
-
-The planned fix is store-level optimistic concurrency (TKT-34XS2R): an
-expected-version carried into the update, so an append becomes a real
-compare-and-swap and the loser retries instead of overwriting. That also removes
-this path's dependence on the in-process write lock. Until then, the safe
-configuration for a multi-process deployment is to prefer `set:` steps over
-`append_section`, or to run a single writer.
+The append guarantee holds across processes that share one PostgreSQL database
+(TKT-WE0S2K), and `TestWebhookConflict_CrossProcessAppendsAllLand` pins it. A
+delivery answers `409` only when it loses the conflict retry budget, which
+takes sustained contention on one entity.
 
 ## Producer support
 
@@ -181,9 +172,9 @@ At most 8 deliveries run at once, across all hooks. Beyond that a delivery is
 refused with **503** and a `Retry-After` header rather than queued.
 
 The bound exists because this endpoint is unauthenticated by rela (the proxy in
-front owns that), and each delivery takes the process-wide write lock — so an
-unbounded flood would stall every other writer, including the UI. Shedding early
-is better than a slow success the producer has already timed out on.
+front owns that), so an unbounded flood would compete with every other writer,
+including the UI. Shedding early is better than a slow success the producer has
+already timed out on.
 
 Producers should treat 503 as retryable and honor `Retry-After`. Icinga does
 not retry at all, so pair it with a NotificationCommand that does

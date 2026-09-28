@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"sort"
 	"strings"
 
@@ -36,6 +37,10 @@ type createCoreOpts struct {
 	// entity gets a stable placeholder ID; validation that depends on
 	// the actual ID (ID-prefix check) is not relevant in that path.
 	SkipIDGeneration bool
+	// mintSpread widens a sequential ID's pick to a random number in
+	// [max+1, max+mintSpread]. Set by [createCore] after a lost mint; 0 or 1
+	// picks max+1.
+	mintSpread int
 }
 
 // resolveCandidateID returns the ID to use for the candidate entity
@@ -67,7 +72,7 @@ func resolveCandidateID(
 		// [Manager.ValidateCreate] sets SkipIDGeneration.
 		return candidatePlaceholderID(entityDef, opts.IDPrefix), nil
 	}
-	return generateID(ctx, deps, entityType, opts.IDPrefix)
+	return generateID(ctx, deps, entityType, opts.IDPrefix, opts.mintSpread)
 }
 
 // candidatePlaceholderID returns the synthetic ID to use for a dry-run
@@ -97,6 +102,39 @@ func candidatePlaceholderID(def *metamodel.EntityDef, requestedPrefix string) st
 func createCore(
 	ctx context.Context, deps Deps, entityType string, opts createCoreOpts,
 ) (*entity.Entity, []entity.Warning, error) {
+	for attempt := 1; ; attempt++ {
+		e, warnings, err := createCoreOnce(ctx, deps, entityType, opts)
+		// A generated ID is minted from a scan, so a concurrent create of the
+		// same type can take it first. The store's create is atomic on the ID,
+		// so the loser lands here and re-mints against the new state. A
+		// caller-supplied ID is the caller's choice: its collision is final.
+		if opts.ID == "" && errors.Is(err, ErrEntityAlreadyExists) && attempt < idMintAttempts {
+			// Every contender re-reads the same max, so a sequential re-mint
+			// of max+1 lets only one of them win per round. Spreading the
+			// retry over a window that doubles each round resolves a burst in
+			// a few rounds, at the cost of a gap in the numbering, and only
+			// when creates actually collided.
+			opts.mintSpread = min(1<<attempt, maxMintSpread)
+			continue
+		}
+		return e, warnings, err
+	}
+}
+
+// idMintAttempts bounds [createCore]'s retry on a generated-ID collision.
+// Each loss means another create of the same type committed in between.
+// With the doubling spread, 10 rounds absorb a burst far larger than the
+// write paths produce (the webhook admits 8 in flight).
+const idMintAttempts = 10
+
+// maxMintSpread caps the retry window, so a collision never skips more than
+// this many sequential numbers.
+const maxMintSpread = 64
+
+// createCoreOnce is one attempt of [createCore].
+func createCoreOnce(
+	ctx context.Context, deps Deps, entityType string, opts createCoreOpts,
+) (*entity.Entity, []entity.Warning, error) {
 	e, warnings, err := buildCandidateEntity(ctx, deps, entityType, opts)
 	if err != nil {
 		return nil, nil, err
@@ -108,15 +146,8 @@ func createCore(
 	// here — not after Store.CreateEntity — means an illegal entry is
 	// rejected without ever emitting a store event (no orphaned index entry,
 	// no SSE broadcast, no un-audited row).
-	if err := deps.Transitions.EnforceCreate(ctx, e); err != nil {
-		return nil, nil, err
-	}
-
-	// Enforce `unique: true` natural-key constraints before the durable
-	// write. excludeSelfID is empty: on create there is no prior version
-	// of this entity to exclude.
-	if err := checkUniqueProperties(ctx, deps, e, ""); err != nil {
-		return nil, nil, err
+	if enforceErr := deps.Transitions.EnforceCreate(ctx, e); enforceErr != nil {
+		return nil, nil, enforceErr
 	}
 
 	// A create must never fall through to an update — that would
@@ -125,7 +156,14 @@ func createCore(
 	// conflict as ErrEntityAlreadyExists. Every write path is now
 	// create-XOR-update by resolved intent; there is no create-then-
 	// update-on-conflict fallback anywhere (BUG-ZWTDH9).
-	if err := deps.Store.CreateEntity(ctx, e); err != nil {
+	//
+	// `unique: true` natural keys are enforced atomically with the write.
+	// excludeSelfID is empty: on create there is no prior version of this
+	// entity to exclude.
+	err = writeWithUniqueCheck(ctx, deps, e, "", func(st store.Store) error {
+		return st.CreateEntity(ctx, e)
+	})
+	if err != nil {
 		// A derived unique-property index (pgstore, TKT-3Q0GP1) rejects a
 		// duplicate PROPERTY value; surface it as the same 422 the pre-write
 		// scan does. Check this BEFORE the ErrConflict branch: UniquePropertyError
@@ -133,6 +171,10 @@ func createCore(
 		// would be wrong for a property duplicate.
 		if ok, mapped := mapUniquePropertyConflict(err); ok {
 			return nil, nil, mapped
+		}
+		var invalid *ValidationError
+		if errors.As(err, &invalid) {
+			return nil, nil, err
 		}
 		if errors.Is(err, store.ErrConflict) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrEntityAlreadyExists, e.ID)
@@ -209,8 +251,9 @@ func buildCandidateEntity(
 }
 
 // generateID generates the next ID for the given entity type. If
-// prefix is non-empty it overrides the metamodel-default prefix.
-func generateID(ctx context.Context, deps Deps, entityType, prefix string) (string, error) {
+// prefix is non-empty it overrides the metamodel-default prefix. spread is
+// [createCoreOpts.mintSpread]; random short IDs ignore it.
+func generateID(ctx context.Context, deps Deps, entityType, prefix string, spread int) (string, error) {
 	entityDef, ok := deps.Meta.GetEntityDef(entityType)
 	if !ok {
 		return "", fmt.Errorf("unknown entity type: %s", entityType)
@@ -232,6 +275,11 @@ func generateID(ctx context.Context, deps Deps, entityType, prefix string) (stri
 	}
 	if entityDef.IsShortID() {
 		return entity.GenerateShortID(existingIDs, prefix, len(existingIDs), entityDef.GetIDCaps()), nil
+	}
+	if spread > 1 {
+		//nolint:gosec // G404: spreading contenders over a window, not a secret
+		skip := rand.IntN(spread)
+		return entity.GenerateSequentialID(existingIDs, prefix, skip), nil
 	}
 	return entity.GenerateNextID(existingIDs, prefix), nil
 }

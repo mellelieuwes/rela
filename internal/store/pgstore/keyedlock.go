@@ -58,21 +58,22 @@ func (s *Store) AcquireKeyedLock(ctx context.Context, key string) (release func(
 		// This guard covers ONE holder, not N. Because each held lock pins a
 		// connection, C concurrent holders that also write need C+1 <= MaxConns
 		// to make progress: at C == MaxConns every connection is a lock and the
-		// writes wait for one that only frees on release. That is a genuine
-		// ceiling on lock concurrency, not something a larger constant fixes —
-		// size the pool above the expected number of simultaneously-held locks,
-		// and prefer a conditional write (unique: / If-Match) over a lock when
-		// the critical section is a single write anyway.
-		//
-		// It is not silent: pgxpool.Acquire blocks, so the symptom is latency
-		// bounded by the caller's ctx deadline rather than corruption. Callers
-		// MUST pass a deadline; that is why Acquire's contract insists on it.
+		// writes wait for one that only frees on release. keyedSlots enforces
+		// that by admitting at most half the pool as holders; further callers
+		// wait for a slot, bounded by their ctx deadline. Prefer a conditional
+		// write (unique: / If-Match) over a lock when the critical section is a
+		// single write anyway.
 		return nil, errors.New(
 			"pgstore: keyed lock needs pool_max_conns >= 2 (the lock pins one connection while the caller's writes use others)")
 	}
 
+	freeSlot, err := takeKeyedSlot(ctx, s.keyedSlots)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
+		freeSlot()
 		return nil, fmt.Errorf("pgstore: keyed lock acquire connection: %w", err)
 	}
 
@@ -90,12 +91,14 @@ func (s *Store) AcquireKeyedLock(ctx context.Context, key string) (release func(
 		keyedLockClassKey, key,
 	); err != nil {
 		conn.Hijack().Close(context.WithoutCancel(ctx))
+		freeSlot()
 		return nil, fmt.Errorf("pgstore: keyed lock %q: %w", key, err)
 	}
 
 	var releaseOnce sync.Once
 	return func() {
 		releaseOnce.Do(func() {
+			defer freeSlot()
 			// Detached ctx so the unlock still runs during shutdown; releasing
 			// the connection would drop the session lock anyway, but an
 			// explicit unlock keeps the pair symmetric and returns a clean
@@ -115,6 +118,31 @@ func (s *Store) AcquireKeyedLock(ctx context.Context, key string) (release func(
 			conn.Release()
 		})
 	}, nil
+}
+
+// keyedLockSlots caps how many keyed locks one store holds at once: half the
+// pool, at least one. Each holder pins a connection and needs another to
+// write, so capping holders here leaves connections for their writes and for
+// unrelated requests (see the C+1 <= MaxConns note in
+// [Store.AcquireKeyedLock]). Nil for a store without a pool, which cannot take
+// a keyed lock anyway.
+func keyedLockSlots(db DBTX) chan struct{} {
+	pool, isPool := db.(*pgxpool.Pool)
+	if !isPool {
+		return nil
+	}
+	return make(chan struct{}, max(1, int(pool.Config().MaxConns)/2))
+}
+
+// takeKeyedSlot waits for a free slot in slots and returns the function that
+// frees it, or ctx's error if ctx ends first.
+func takeKeyedSlot(ctx context.Context, slots chan struct{}) (func(), error) {
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("pgstore: keyed lock wait: %w", ctx.Err())
+	}
 }
 
 // KeyedLocker is the optional store capability [Store.AcquireKeyedLock]

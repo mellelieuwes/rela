@@ -36,45 +36,26 @@ import (
 //   - Comparison is on the string value (identity keys — email, UPN — are
 //     strings). Non-string property values are compared via their string
 //     form and in practice only strings carry unique keys.
-//   - This scan is a check-then-write, NOT an atomic constraint: the scan
-//     and the durable write are separate operations with no lock held
-//     across them, so under concurrent writers (the data-entry server is
-//     one goroutine per request) two racing writes with the same value
-//     could both pass the scan. On PostgreSQL the durable write is
-//     backstopped by a store-level partial unique index that pgstore
-//     maintains from the metamodel (TKT-3Q0GP1): the second writer's
-//     insert fails atomically and surfaces as [store.UniquePropertyError],
-//     which the write path maps to the SAME 422 this scan produces — so
-//     the scan stays the friendly primary path and the index closes the
-//     race. On fsstore/memstore there is no such index (single-writer, so
-//     the scan suffices); the ACL resolver's multi-match fallback
-//     (keep-raw) remains the runtime backstop for the identity-key case.
-//     See docs/acl-security.md and docs/postgres-backend.md.
+//   - The scan alone is a check-then-write. Callers make it atomic by running
+//     the scan and the durable write through [writeWithUniqueCheck], which
+//     puts both in one [store.Transactor.Tx] on the transaction's view. That
+//     serializes against every other manager write that sets a unique
+//     property on every backend: fs/mem/sqlite writes all take the Tx
+//     mutex, and on PostgreSQL every such write goes through this same Tx.
+//     pgstore additionally backstops the write with a derived partial unique
+//     index (TKT-3Q0GP1) whose violation surfaces as
+//     [store.UniquePropertyError], mapped to the SAME 422 this scan
+//     produces. See docs/acl-security.md and docs/postgres-backend.md.
+//
+// st is the store to scan: the Tx view when called from inside a
+// transaction, never the outer store (an outer-store call inside a Tx
+// callback bypasses the transaction on pg and can deadlock on fs).
 func checkUniqueProperties(
-	ctx context.Context, deps Deps, e *entity.Entity, excludeSelfID string,
+	ctx context.Context, meta *metamodel.Metamodel, st store.Store, e *entity.Entity, excludeSelfID string,
 ) error {
-	def, ok := deps.Meta.GetEntityDef(e.Type)
-	if !ok { // coverage-ignore: defensive: every caller runs ValidateEntity first, which hard-rejects an unknown type
-		// (ValidationErrorUnknownType is not soft), so an unknown type here needs a metamodel reload race
-		return nil // unknown type is caught by ValidateEntity's own path
-	}
-
-	// Collect the unique, non-list properties this entity actually sets to
-	// a non-empty value. If none, skip the scan entirely — the common case
+	// Skip the scan entirely when e sets no unique value — the common case
 	// for types without a natural key pays nothing.
-	type uniqueProp struct {
-		name  string
-		value string
-	}
-	var toCheck []uniqueProp
-	for name, pd := range def.PropertyDefs() {
-		if !pd.Unique || pd.List {
-			continue
-		}
-		if v := e.GetString(name); v != "" {
-			toCheck = append(toCheck, uniqueProp{name: name, value: v})
-		}
-	}
+	toCheck := uniqueValues(meta, e)
 	if len(toCheck) == 0 {
 		return nil
 	}
@@ -91,7 +72,7 @@ func checkUniqueProperties(
 	// per-entity reading is TKT-HXT2P9.
 	var violations []*metamodel.ValidationError
 	q := store.EntityQuery{Type: e.Type, AllStates: true}
-	for other, err := range deps.Store.ListEntities(ctx, q) {
+	for other, err := range st.ListEntities(ctx, q) {
 		if err != nil {
 			// A partial scan cannot prove uniqueness — fail the write loud
 			// rather than admit a possible duplicate.
@@ -128,6 +109,58 @@ func checkUniqueProperties(
 		return newValidationError(violations)
 	}
 	return nil
+}
+
+// uniqueProp is one unique, non-list property e sets to a non-empty value.
+type uniqueProp struct {
+	name  string
+	value string
+}
+
+// uniqueValues returns the unique, non-list properties e sets to a non-empty
+// value; empty when e sets none.
+func uniqueValues(meta *metamodel.Metamodel, e *entity.Entity) []uniqueProp {
+	def, ok := meta.GetEntityDef(e.Type)
+	if !ok { // coverage-ignore: defensive: every caller runs ValidateEntity first, which hard-rejects an unknown type
+		// (ValidationErrorUnknownType is not soft), so an unknown type here needs a metamodel reload race
+		return nil // unknown type is caught by ValidateEntity's own path
+	}
+	var out []uniqueProp
+	for name, pd := range def.PropertyDefs() {
+		if !pd.Unique || pd.List {
+			continue
+		}
+		if v := e.GetString(name); v != "" {
+			out = append(out, uniqueProp{name: name, value: v})
+		}
+	}
+	return out
+}
+
+// writeWithUniqueCheck runs write with e's `unique:` constraint enforced
+// atomically against it (see [checkUniqueProperties] for the semantics).
+//
+// When e sets no unique value, write runs directly against deps.Store and no
+// transaction is opened. Otherwise the scan and write run inside one
+// [store.Transactor.Tx], both against the transaction's view: write receives
+// that view and must issue every store call through it.
+//
+// The callback holds a schema-wide lock on pgstore and the write mutex on
+// fs/mem/sqlite, so write must be a plain store write — never a public
+// Manager call (automations, audit, cascades and version capture stay
+// outside), and never slow external I/O.
+func writeWithUniqueCheck(
+	ctx context.Context, deps Deps, e *entity.Entity, excludeSelfID string, write func(st store.Store) error,
+) error {
+	if len(uniqueValues(deps.Meta, e)) == 0 {
+		return write(deps.Store)
+	}
+	return deps.Store.Tx(ctx, func(view store.Store) error {
+		if err := checkUniqueProperties(ctx, deps.Meta, view, e, excludeSelfID); err != nil {
+			return err
+		}
+		return write(view)
+	})
 }
 
 // mapUniquePropertyConflict translates a store-level derived-unique-index

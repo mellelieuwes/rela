@@ -801,32 +801,19 @@ func (m *Manager) CreateEntity(
 		Entity: created,
 	})
 	if len(autoResult.PropertiesSet) > 0 {
-		if err := rejectComputedPresent(m.deps, created.Type, stringMapAny(autoResult.PropertiesSet)); err != nil {
+		// A compare-and-swap onto the stored row, not a write of `created`:
+		// a concurrent patch that landed after createCore must survive. The
+		// unique constraint is re-enforced against the POST-automation values
+		// inside the same write, so an automation that sets a `unique`
+		// property cannot write a duplicate natural key (the create path must
+		// not be the weaker one). It is an update, never an upsert: createCore
+		// already persisted the row (BUG-ZWTDH9).
+		written, err := writeAutomationProperties(ctx, m.deps, created, autoResult.PropertiesSet, nil)
+		if err != nil {
 			return nil, err
 		}
-		for prop, val := range autoResult.PropertiesSet {
-			created.SetString(prop, val)
-		}
-		if err := m.deps.Computed.Evaluate(ctx, created); err != nil {
-			return nil, err
-		}
-		// Re-enforce unique constraints against the POST-automation values:
-		// createCore's check ran before automations, so an automation that
-		// set a `unique` property could otherwise write a duplicate natural
-		// key that the update path would reject (the create path must not be
-		// the weaker one). excludeSelfID is created.ID — the entity is
-		// already persisted from createCore, so it must not collide with
-		// itself. A violation aborts before the duplicate is re-written.
-		if err := checkUniqueProperties(ctx, m.deps, created, created.ID); err != nil {
-			return nil, err
-		}
-		// UpdateEntity, not upsert: createCore already persisted this row
-		// above, so the post-automation re-write is unambiguously an
-		// update of an existing entity (BUG-ZWTDH9 — no create-then-
-		// update fallback anywhere).
-		if writeErr := m.deps.Store.UpdateEntity(ctx, created); writeErr != nil {
-			return nil, fmt.Errorf("write entity after automation: %w", writeErr)
-		}
+		created = written
+		result.Entity = created
 		// Recompute warnings against the post-automation state
 		// (DEC-HWZHA). The pre-write warnings from createCore reflect
 		// the entity before automation set any properties.
@@ -1004,11 +991,19 @@ func (m *Manager) UpdateEntity(ctx context.Context, e *entity.Entity) (*entity.U
 // for the merge, not the check, so no TOCTOU window exists between them.
 //
 // A caller that wants a bounded retry loop re-reads, re-derives its patch,
-// and retries with the conflict's Actual version. Note that most callers do
-// NOT need this: a patch already preserves properties it does not name, so an
-// unconditional patch can only lose an update when two writers name the same
-// property. ExpectedVersion is for the cases where that is exactly what
-// happens — notably a Content replacement computed from a base read.
+// and retries with the conflict's Actual version. ExpectedVersion is for a
+// patch derived from something the caller read — notably a Content
+// replacement computed from a base read.
+//
+// Without ExpectedVersion the patch is STILL written as a compare-and-swap,
+// against the row this method read as its merge base, and retried a bounded
+// number of times (read, authorize, merge, write) when another writer lands
+// in between. The merge writes the whole row, so an unconditional write
+// would erase a concurrent patch to a DIFFERENT property. Nothing serializes
+// writers above the store, in this process or across processes, so the store
+// precondition is what keeps disjoint patches from losing each other.
+// Automations only compute a result before the write, and the cascade runs
+// after it, so a retried attempt has no side effects to repeat.
 func (m *Manager) PatchEntity(
 	ctx context.Context, id string, p entity.Patch,
 ) (*entity.UpdateResult, error) {
@@ -1016,7 +1011,25 @@ func (m *Manager) PatchEntity(
 	if id == "" {
 		return nil, errors.New("entitymanager: PatchEntity: id is empty")
 	}
+	pinToRead := p.ExpectedVersion == ""
+	for attempt := 1; ; attempt++ {
+		res, err := m.patchEntityOnce(ctx, id, p, pinToRead)
+		if pinToRead && isVersionConflict(err) && attempt < casRetryAttempts {
+			if berr := casBackoff(ctx, attempt); berr != nil {
+				return nil, berr
+			}
+			continue
+		}
+		return res, err
+	}
+}
 
+// patchEntityOnce is one attempt of [Manager.PatchEntity]. With pinToRead the
+// write is conditional on the version of the row it read, rather than on
+// p.ExpectedVersion.
+func (m *Manager) patchEntityOnce(
+	ctx context.Context, id string, p entity.Patch, pinToRead bool,
+) (*entity.UpdateResult, error) {
 	// RAW read, deliberately ungated: this is write-prep, and the merge
 	// base must be the complete stored entity or hidden properties would
 	// be dropped from the clone and erased on save. Consolidating this
@@ -1078,7 +1091,11 @@ func (m *Manager) PatchEntity(
 	updated := stored.Clone()
 	p.Apply(updated)
 
-	return m.updateCore(ctx, updated, stored, p.ExpectedVersion)
+	expected := p.ExpectedVersion
+	if pinToRead {
+		expected = string(store.VersionOf(stored))
+	}
+	return m.updateCore(ctx, updated, stored, expected)
 }
 
 // updateCore is the shared post-authorization update pipeline: validate,
@@ -1100,7 +1117,8 @@ func (m *Manager) PatchEntity(
 // separately for their own reasons — internal/mcp does, to validate
 // property names against the entity type before dispatching.
 // expectedVersion carries the caller's compare-and-swap precondition down to
-// the durable write. Empty means unconditional (the historical behavior).
+// the durable write. Empty means unconditional; PatchEntity passes the
+// version of its merge base even when its caller gave none.
 func (m *Manager) updateCore(
 	ctx context.Context, e, oldEntity *entity.Entity, expectedVersion string,
 ) (*entity.UpdateResult, error) {
@@ -1159,21 +1177,27 @@ func (m *Manager) updateCore(
 	}
 
 	// Enforce `unique: true` natural-key constraints against the final
-	// (post-automation) property values, excluding this entity's own
-	// prior version so a re-save of an unchanged value does not collide.
-	if err := checkUniqueProperties(ctx, m.deps, e, e.ID); err != nil {
-		return nil, err
-	}
-
+	// (post-automation) property values, atomically with the write,
+	// excluding this entity's own prior version so a re-save of an unchanged
+	// value does not collide.
+	//
 	// UpdateEntity, not upsert: the GetEntity above already established
 	// the row exists (else we returned ErrEntityNotFound), so this is
 	// unambiguously an update (BUG-ZWTDH9).
 	// The CAS precondition rides down to the store, which is the only layer
 	// that can compare-and-write atomically. Empty expectedVersion yields the
-	// zero condition, i.e. the unconditional write this path always did.
-	if _, err := m.deps.Store.UpdateEntityIf(ctx, e, store.UpdateCondition{
-		ExpectedVersion: store.EntityVersion(expectedVersion),
+	// zero condition: an unconditional write, for a caller that owns the
+	// whole entity (UpdateEntity).
+	if err := writeWithUniqueCheck(ctx, m.deps, e, e.ID, func(st store.Store) error {
+		_, werr := st.UpdateEntityIf(ctx, e, store.UpdateCondition{
+			ExpectedVersion: store.EntityVersion(expectedVersion),
+		})
+		return werr
 	}); err != nil {
+		var invalid *ValidationError
+		if errors.As(err, &invalid) {
+			return nil, err
+		}
 		// A derived unique-property index can reject an update whose (possibly
 		// automation-set) value duplicates another entity's, even though the
 		// scan above passed under a concurrent writer. Surface it as the same
@@ -1918,26 +1942,38 @@ func (m *Manager) CreateRelation(
 	// Auto-assign managed order properties (_order_out / _order_in) when
 	// the relation type declares the side orderable. Overrides any
 	// non-finite caller-supplied value with AppendOrder over existing
-	// siblings; keeps finite caller values as-is.
-	if err := m.assignManagedOrder(ctx, rel, relType); err != nil {
-		return nil, err
-	}
-
+	// siblings; keeps finite caller values as-is. The sibling scan and the
+	// create share one Tx so two concurrent appends cannot both read the
+	// same last value and land on the same position.
+	//
 	// CreateRelation, not upsert: a create must never fall through to an
 	// update (that would clobber a racing create of the same triple).
 	// The GetRelation pre-check above is advisory; the store's atomic
 	// create is the real guard, and a conflict surfaces as
 	// ErrRelationAlreadyExists (BUG-ZWTDH9).
-	if _, err := m.deps.Store.CreateRelation(ctx, from, relType, to, &store.RelationData{
-		Properties: rel.Properties,
-		Content:    rel.Content,
-		FromFace:   opts.FromFace,
-	}); err != nil {
-		if errors.Is(err, store.ErrConflict) {
+	create := func(st store.Store) error {
+		if err := m.assignManagedOrder(ctx, st, rel, relType); err != nil {
+			return err
+		}
+		_, err := st.CreateRelation(ctx, from, relType, to, &store.RelationData{
+			Properties: rel.Properties,
+			Content:    rel.Content,
+			FromFace:   opts.FromFace,
+		})
+		return err
+	}
+	var createErr error
+	if relTypeIsOrdered(m.deps.Meta, relType) {
+		createErr = m.deps.Store.Tx(ctx, create)
+	} else {
+		createErr = create(m.deps.Store)
+	}
+	if createErr != nil {
+		if errors.Is(createErr, store.ErrConflict) {
 			return nil, fmt.Errorf("%w: %s --%s--> %s", ErrRelationAlreadyExists,
 				entity.FormatStateRef(from, opts.FromFace), relType, to)
 		}
-		return nil, err
+		return nil, createErr
 	}
 	m.recordRelationAudit(ctx, audit.OpCreateRelation, rel, "created")
 	return rel, nil
@@ -1973,19 +2009,6 @@ func (m *Manager) UpdateRelation(
 		return nil, aclErr
 	}
 
-	// Addressed by TAIL as well as triple (BUG-64MU2Q): GetRelation reads the
-	// default-tail edge, so on a faced source it would load a DIFFERENT edge
-	// and the merge below would write the caller's properties onto it.
-	rel, err := getRelationOnFace(ctx, m.deps.Store, from, opts.FromFace, relType, to)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s --%s--> %s", ErrRelationNotFound,
-			entity.FormatStateRef(from, opts.FromFace), relType, to)
-	}
-
-	// Snapshot pre-update meta keys so the audit summary names exactly
-	// which keys changed (values never appear).
-	oldProps := cloneProperties(rel.Properties)
-
 	// Reject non-finite numeric values on managed order properties.
 	// HTTP wire validators already cover the dataentry path; this is
 	// the engine-level backstop for MCP/Lua/CLI write paths.
@@ -1998,25 +2021,50 @@ func (m *Manager) UpdateRelation(
 		}
 	}
 
-	if rel.Properties == nil && (len(opts.Properties) > 0 || len(opts.MetaUnset) > 0) {
-		rel.Properties = make(map[string]any)
-	}
-	maps.Copy(rel.Properties, opts.Properties)
-	for _, k := range opts.MetaUnset {
-		delete(rel.Properties, k)
-	}
-	if opts.Content != nil {
-		rel.Content = *opts.Content
-	}
+	// Read, merge and write in one Tx: relations carry no version to
+	// compare-and-swap on, so without it two concurrent updates naming
+	// different properties would each write back the row they read and the
+	// first update would be lost.
+	var rel *entity.Relation
+	var oldProps map[string]any
+	err := m.deps.Store.Tx(ctx, func(view store.Store) error {
+		// Addressed by TAIL as well as triple (BUG-64MU2Q): GetRelation reads
+		// the default-tail edge, so on a faced source it would load a
+		// DIFFERENT edge and the merge below would write the caller's
+		// properties onto it.
+		var gErr error
+		rel, gErr = getRelationOnFace(ctx, view, from, opts.FromFace, relType, to)
+		if gErr != nil {
+			return fmt.Errorf("%w: %s --%s--> %s", ErrRelationNotFound,
+				entity.FormatStateRef(from, opts.FromFace), relType, to)
+		}
 
-	// UpdateRelation, not upsert: the GetRelation above established the
-	// triple exists (else we returned ErrRelationNotFound), so this is
-	// unambiguously an update (BUG-ZWTDH9).
-	if _, err := m.deps.Store.UpdateRelationState(ctx, from, opts.FromFace, relType, to,
-		store.RelationData{
-			Properties: rel.Properties,
-			Content:    rel.Content,
-		}); err != nil {
+		// Snapshot pre-update meta keys so the audit summary names exactly
+		// which keys changed (values never appear).
+		oldProps = cloneProperties(rel.Properties)
+
+		if rel.Properties == nil && (len(opts.Properties) > 0 || len(opts.MetaUnset) > 0) {
+			rel.Properties = make(map[string]any)
+		}
+		maps.Copy(rel.Properties, opts.Properties)
+		for _, k := range opts.MetaUnset {
+			delete(rel.Properties, k)
+		}
+		if opts.Content != nil {
+			rel.Content = *opts.Content
+		}
+
+		// UpdateRelation, not upsert: the read above established the triple
+		// exists (else ErrRelationNotFound), so this is unambiguously an
+		// update (BUG-ZWTDH9).
+		_, wErr := view.UpdateRelationState(ctx, from, opts.FromFace, relType, to,
+			store.RelationData{
+				Properties: rel.Properties,
+				Content:    rel.Content,
+			})
+		return wErr
+	})
+	if err != nil {
 		return nil, err
 	}
 	m.recordRelationAudit(ctx, audit.OpUpdateRelation, rel, updateRelationSummary(oldProps, rel.Properties))
@@ -2086,4 +2134,11 @@ func (m *Manager) DeleteRelationState(
 		m.recordRelationAudit(ctx, audit.OpDeleteRelation, rel, "deleted")
 	}
 	return nil
+}
+
+// relTypeIsOrdered reports whether relType declares a managed order property
+// on either side, so creating one reads its siblings.
+func relTypeIsOrdered(meta *metamodel.Metamodel, relType string) bool {
+	def, ok := meta.Relations[relType]
+	return ok && (def.OutgoingOrderProperty() != "" || def.IncomingOrderProperty() != "")
 }

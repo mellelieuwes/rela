@@ -22,11 +22,6 @@ import (
 // Must match the regex used in dataentryconfig.validateActions.
 var actionIDRegex = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
-// actionTimeout is the maximum execution time for an action script.
-// Tighter than the default Lua timeout because the action handler holds
-// writeMu for the entire script execution, blocking other mutations.
-const actionTimeout = 5 * time.Second
-
 // handleV1Action executes a configured action script and returns the result.
 // Endpoint: POST /api/v1/_action/{id}
 //
@@ -34,9 +29,9 @@ const actionTimeout = 5 * time.Second
 // entity_type to set the entity context for the script (used by list actions
 // that invoke a script once per selected entity).
 //
-// Action scripts may mutate the workspace, so we serialize them via
-// writeMu for the duration of script execution. Concurrent reloads,
-// other mutations, and other action scripts wait for writeMu.
+// Scripts run concurrently with each other and with every other write. Each
+// write a script makes is individually protected by the manager, but a
+// sequence of writes is not atomic.
 func (h *writeHandler) handleV1Action(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -88,8 +83,8 @@ func (h *writeHandler) handleV1Action(w http.ResponseWriter, r *http.Request) {
 
 	correlationID := newCorrelationID()
 
-	// Resolve the caller-supplied entity_id through the SCRIPT READER, before
-	// taking writeMu and before it reaches the script.
+	// Resolve the caller-supplied entity_id through the SCRIPT READER before
+	// it reaches the script.
 	//
 	// `entity_id` names an entity the script receives as the global `entity`
 	// (script.Engine.ExecuteAction), so resolving it through the raw store made
@@ -131,12 +126,10 @@ func (h *writeHandler) handleV1Action(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Serialize action script execution against other mutations and
-	// against workspace reloads via writeMu. Provision under the lock (a no-op
-	// unless unmatched_principal: provision fired) so an action-triggered write
-	// by an unmatched verified principal is covered like CRUD.
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	// Provision (a no-op unless unmatched_principal: provision fired) so an
+	// action-triggered write by an unmatched verified principal is covered
+	// like CRUD.
+	r = h.withProvision(r)
 
 	// An entity-bound action (available_on) resolves and gates its entity
 	// UNDER the lock, so no other writer in this process can change the
@@ -165,7 +158,7 @@ func (h *writeHandler) handleV1Action(w http.ResponseWriter, r *http.Request) {
 			TriggerEntity: ent,
 			Params:        action.Params,
 			Request:       payload.Request,
-			Timeout:       actionTimeout,
+			Timeout:       lua.DefaultTimeout,
 			CorrelationID: correlationID,
 		})
 	if err != nil {

@@ -164,12 +164,6 @@ func (m *Manager) ApplyEntity(ctx context.Context, e *entity.Entity) (*entity.Up
 		return nil, newValidationError(hard)
 	}
 
-	// Enforce `unique: true` natural-key constraints, excluding this
-	// entity's own prior version (sync upserts an existing ID).
-	if err := checkUniqueProperties(ctx, m.deps, e, e.ID); err != nil {
-		return nil, err
-	}
-
 	// Enforce enum state machines on the sync/upsert path too (RR-NB135): this
 	// is a served write with a real principal, so skipping it would let a sync
 	// client land an illegal transition or bypass a guard — the exact hole the
@@ -199,7 +193,12 @@ func (m *Manager) ApplyEntity(ctx context.Context, e *entity.Entity) (*entity.Up
 	// symmetric with the relation vanished-on-update case). This is what
 	// closes the residual on the postgres multi-writer backend
 	// (BUG-ZWTDH9).
-	if err := m.persistApplyEntity(ctx, op.aclOp, e); err != nil {
+	//
+	// `unique: true` natural keys are enforced atomically with the write,
+	// excluding this entity's own prior version (sync upserts an existing ID).
+	if err := writeWithUniqueCheck(ctx, m.deps, e, e.ID, func(st store.Store) error {
+		return persistApplyEntity(ctx, st, op.aclOp, e)
+	}); err != nil {
 		return nil, err
 	}
 	m.recordEntityAudit(ctx, op.auditOp, e, op.summary)
@@ -213,9 +212,9 @@ func (m *Manager) ApplyEntity(ctx context.Context, e *entity.Entity) (*entity.Up
 // wraps ErrEntityNotFound). Neither branch falls back to the other, so a
 // create-intent write that races a concurrent create can never become a blind,
 // re-typing update.
-func (m *Manager) persistApplyEntity(ctx context.Context, op acl.Op, e *entity.Entity) error {
+func persistApplyEntity(ctx context.Context, st store.Store, op acl.Op, e *entity.Entity) error {
 	if op == acl.OpCreate {
-		if err := m.deps.Store.CreateEntity(ctx, e); err != nil {
+		if err := st.CreateEntity(ctx, e); err != nil {
 			// A derived unique-property index rejects a duplicate PROPERTY value
 			// (TKT-3Q0GP1). Check before ErrConflict (which UniquePropertyError
 			// also satisfies) so it surfaces as the property 422, not the
@@ -230,7 +229,7 @@ func (m *Manager) persistApplyEntity(ctx context.Context, op acl.Op, e *entity.E
 		}
 		return nil
 	}
-	if err := m.deps.Store.UpdateEntity(ctx, e); err != nil {
+	if err := st.UpdateEntity(ctx, e); err != nil {
 		if ok, mapped := mapUniquePropertyConflict(err); ok {
 			return mapped
 		}
@@ -329,7 +328,14 @@ func (m *Manager) persistApplyRelation(ctx context.Context, op acl.Op, r *entity
 		}
 		return nil
 	}
-	if _, err := m.deps.Store.UpdateRelation(ctx, r.From, r.Type, r.To, data); err != nil {
+	// In a Tx so it cannot land between UpdateRelation's read and write,
+	// which run in one Tx; otherwise that update would write back the row it
+	// read and drop this one.
+	err := m.deps.Store.Tx(ctx, func(view store.Store) error {
+		_, err := view.UpdateRelation(ctx, r.From, r.Type, r.To, data)
+		return err
+	})
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("%w: %s --%s--> %s", ErrRelationNotFound, r.From, r.Type, r.To)
 		}

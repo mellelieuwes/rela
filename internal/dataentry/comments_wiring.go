@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/Sourcehaven-BV/rela/internal/acl"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
@@ -32,11 +31,10 @@ type commentsHandler struct {
 
 	// The accept route (TKT-S5C0K3) writes the entity body, so it needs what
 	// every other mutation handler has: the RAW reader for the splice base
-	// and version token, the manager to apply the patch, and the shared write
-	// lock with its provision seam.
+	// and version token, the manager to apply the patch, and the provision
+	// seam.
 	reader    entityReader
 	patcher   suggestionPatcher
-	writeMu   *sync.Mutex
 	provision func(context.Context) context.Context
 	// audit records an accept the ACL refuses before the manager is reached.
 	audit func() audit.Audit
@@ -62,18 +60,15 @@ func newCommentsHandler(app *App, patcher suggestionPatcher) *commentsHandler {
 		visibleReader: app.visibleReader,
 		reader:        app.reader,
 		patcher:       patcher,
-		writeMu:       &app.writeMu,
 		provision:     newProvisionSeam(app),
 		audit:         func() audit.Audit { return app.auditSink },
 	}
 }
 
-// enterWrite acquires writeMu and runs the provision seam under it, returning
-// the request with the re-stamped context. The caller must defer
-// h.writeMu.Unlock(). The same shape as the other write handlers, which
-// provision_seam_invariant_test.go holds every writeMu user to.
-func (h *commentsHandler) enterWrite(r *http.Request) *http.Request {
-	h.writeMu.Lock()
+// withProvision runs the provision seam, returning the request with the
+// re-stamped context. The same shape as the other write handlers, which
+// provision_seam_invariant_test.go holds every write route to.
+func (h *commentsHandler) withProvision(r *http.Request) *http.Request {
 	if h.provision != nil {
 		return r.WithContext(h.provision(r.Context()))
 	}

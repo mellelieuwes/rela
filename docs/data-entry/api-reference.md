@@ -232,7 +232,10 @@ The validation-first ordering means a relation 422 leaves the entity
 **untouched**. The unavoidable atomicity gap is mid-write-loop store failures
 (disk full, permission denied, etc.) — these are rare, irrecoverable, and
 return a 500 with `relation_write_failed`. The legacy reconciler had the same
-property; this PR doesn't make it worse.
+property; this PR doesn't make it worse. Concurrent requests that add or drop
+the same edge are not failures: the reconciler switches between update and
+create when it finds the edge in the other state, and answers 409 `conflict`
+only if the edge keeps flipping under it.
 
 The store interface (internal/store/store.go) intentionally has no
 transaction primitive — adding one would fight the pluggable-backends goal
@@ -278,10 +281,11 @@ Mismatch → 412 Precondition Failed.
 
 The precondition is re-checked by the store, atomically with the write
 (TKT-34XS2R). Previously the compare and the write were separate steps made
-safe only by a process-local write lock, so two `rela-server` processes against
-one PostgreSQL database could both pass the compare and the second could
-overwrite the first. A write that loses that race now returns 412 as well — the
-same status, and the same remedy for the client: re-read, re-apply, retry.
+safe only by a process-local write lock (removed in TKT-WE0S2K), so two
+`rela-server` processes against one PostgreSQL database could both pass the
+compare and the second could overwrite the first. A write that loses that race
+now returns 412 as well — the same status, and the same remedy for the client:
+re-read, re-apply, retry.
 
 ## MCP and Lua content semantics
 
@@ -610,8 +614,8 @@ The handler runs the same defaults + affordance evaluation the real
 create would, against the candidate (type + supplied properties, no
 persisted ID), and returns a normal per-entity response shape —
 `_fields`, `_relations`, stripped hidden `properties`, and DEC-HWZHA
-soft `warnings` — **without persisting anything, without an audit row,
-and without taking the write lock** (it is a read-shaped operation).
+soft `warnings` — **without persisting anything and without an audit row**
+(it is a read-shaped operation).
 The response is `Cache-Control: no-store` with no ETag.
 
 Properties:
@@ -873,6 +877,17 @@ on the property's `max`:
   (normalized) name already exists is **auto-suffixed** (`report.pdf` →
   `report (1).pdf`) so it never overwrites a sibling. Uploading past the cap
   returns `409 attachment_limit`.
+
+Concurrent uploads and deletes to the same property take turns, so the cap
+and the replace hold under concurrency. The write permission is checked again
+when a write's turn comes, so a permission revoked during a slow upload still
+stops it. Upload bytes are received before the wait starts, so a slow upload
+never holds up another writer.
+
+A write answers `503 attachment_busy` with `Retry-After: 1` when it waits more
+than 60 seconds for its turn, or when the server is already handling its
+maximum number of concurrent uploads (4 per process). Nothing was written, and
+the client may retry.
 
 **Access inherits the owning entity's `update` permission** — an
 attachment write mutates the entity, so it is authorized as an `update`,

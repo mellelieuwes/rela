@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
+	"github.com/Sourcehaven-BV/rela/internal/store"
 )
 
 // ErrHasRelations is returned by [Manager.DeleteEntity] when cascade
@@ -124,6 +125,28 @@ func (e *ValidationError) Error() string {
 		msgs[i] = err.Error()
 	}
 	return "validation errors:\n  " + strings.Join(msgs, "\n  ")
+}
+
+// IsUniqueViolation reports whether err is a `unique:` collision. It arrives
+// by two routes, both as a [ValidationError] carrying
+// [metamodel.ValidationErrorUnique]: the manager's own scan raises it
+// directly, and a pgstore derived-index violation is re-presented as the same
+// error. A raw [store.UniquePropertyError] is matched too, for a caller that
+// sees one before the manager maps it.
+func IsUniqueViolation(err error) bool {
+	var unique store.UniquePropertyError
+	if errors.As(err, &unique) {
+		return true
+	}
+	var invalid *ValidationError
+	if errors.As(err, &invalid) {
+		for _, v := range invalid.Errors {
+			if v.Type == metamodel.ValidationErrorUnique {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // newValidationError wraps a slice of metamodel validation errors.

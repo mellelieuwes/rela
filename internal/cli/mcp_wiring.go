@@ -10,7 +10,9 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/acl"
 	"github.com/Sourcehaven-BV/rela/internal/appbuild"
+	"github.com/Sourcehaven-BV/rela/internal/attachment"
 	"github.com/Sourcehaven-BV/rela/internal/config"
+	"github.com/Sourcehaven-BV/rela/internal/lock"
 	relamcp "github.com/Sourcehaven-BV/rela/internal/mcp"
 	"github.com/Sourcehaven-BV/rela/internal/script"
 	"github.com/Sourcehaven-BV/rela/internal/store"
@@ -50,10 +52,13 @@ type mcpServices struct {
 	// service generation — job queue, mail worker, GC sweep — against a store
 	// Close has already torn down, and nothing would ever stop them.
 	closed bool
-	// attachMu serializes the MCP attachment writes of this process. It
-	// outlives reloads, so writes under an old and a new schema still
-	// exclude each other.
-	attachMu sync.Mutex
+	// attachLocker serializes the MCP attachment writes of this process per
+	// (entity, property). It outlives reloads, so writes under an old and a
+	// new schema still exclude each other.
+	attachLocker lock.Locker
+	// attachUploads bounds this process's concurrent MCP uploads. It
+	// outlives reloads for the same reason.
+	attachUploads *attachment.Limiter
 }
 
 // current returns the live services bundle.
@@ -81,9 +86,11 @@ func newMCPServices(startDir string) (*mcpServices, error) {
 		return nil, err
 	}
 	return &mcpServices{
-		svc:     svc,
-		origin:  svc,
-		watcher: &mcpWatcher{store: svc.Store()},
+		svc:           svc,
+		origin:        svc,
+		watcher:       &mcpWatcher{store: svc.Store()},
+		attachLocker:  lock.For(svc.Store()),
+		attachUploads: attachment.NewLimiter(attachment.DefaultMaxUploads),
 	}, nil
 }
 
@@ -257,12 +264,12 @@ func (s *mcpServices) deps() relamcp.Deps {
 // reload, which rebuilds the Deps. Caller holds mu.
 func (s *mcpServices) attachmentDeps() relamcp.AttachmentDeps {
 	snap, err := relamcp.NewAttachmentSnapshot(
-		s.svc.Store(), s.svc.EntityManager(), s.svc.Meta(), nil, store.MaxAttachmentBytes)
+		s.svc.Store(), s.svc.EntityManager(), s.attachLocker, s.svc.ACL(), s.svc.Meta(), nil, store.MaxAttachmentBytes)
 	return relamcp.AttachmentDeps{
 		Snapshot:   func() (relamcp.AttachmentSnapshot, error) { return snap, err },
+		Uploads:    s.attachUploads,
 		Authorizer: s.svc.ACL(),
 		Audit:      s.svc.Audit(),
-		WriteLock:  &s.attachMu,
 	}
 }
 

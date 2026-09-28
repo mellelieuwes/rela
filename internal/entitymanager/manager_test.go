@@ -116,6 +116,12 @@ func (s *countingStore) UpdateEntity(ctx context.Context, e *entity.Entity) erro
 	s.updates.Add(1)
 	return s.Store.UpdateEntity(ctx, e)
 }
+func (s *countingStore) UpdateEntityIf(
+	ctx context.Context, e *entity.Entity, cond store.UpdateCondition,
+) (store.EntityVersion, error) {
+	s.updates.Add(1)
+	return s.Store.UpdateEntityIf(ctx, e, cond)
+}
 func (s *countingStore) DeleteEntity(ctx context.Context, id string, cascade bool) (*store.DeleteResult, error) {
 	s.deletes.Add(1)
 	return s.Store.DeleteEntity(ctx, id, cascade)

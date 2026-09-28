@@ -76,7 +76,7 @@ func (h *cascadeHost) CreateEntity(
 	return e, err
 }
 
-// WriteEntity satisfies [autocascade.Host.WriteEntity] by updating an
+// WriteEntity satisfies [autocascade.Host.WriteEntity] by applying set to an
 // already-persisted entity.
 //
 // It is an UPDATE, never an upsert: the Runner only calls WriteEntity to
@@ -84,6 +84,10 @@ func (h *cascadeHost) CreateEntity(
 // CreateEntity earlier in the SAME cascade, so the row is guaranteed to
 // exist. A create-then-update fallback here would be the lost-update /
 // type-re-type vector removed in BUG-ZWTDH9.
+//
+// It is a compare-and-swap onto the stored row (see
+// [writeAutomationProperties]), so a patch that landed after the cascade's
+// create is kept.
 //
 // Note: no audit record here. The earlier CreateEntity already produced
 // one audit record for this entity; emitting another for the property-set
@@ -96,50 +100,32 @@ func (h *cascadeHost) CreateEntity(
 // reason ("the create path must not be the weaker one" — see CreateEntity);
 // without them here, an automation could silently persist a duplicate of a
 // `unique:` natural key, or a value validation would reject.
-//
-// Excluding e.ID from the unique scan is what makes this an idempotent
-// re-check rather than a self-collision: the row is already persisted, so it
-// would otherwise match itself.
-func (h *cascadeHost) WriteEntity(ctx context.Context, e *entity.Entity) error {
+func (h *cascadeHost) WriteEntity(ctx context.Context, e *entity.Entity, set map[string]string) error {
 	if e == nil { // coverage-ignore: defensive: Runner only calls WriteEntity with an entity it created earlier in the
 		// same cascade; never nil
 		return nil
 	}
-	stored, err := h.deps.Store.GetEntity(ctx, e.ID)
-	if err != nil {
-		return err
-	}
-	if err := rejectComputedChanges(h.deps, stored, e); err != nil {
-		return err
-	}
-	if err := h.deps.Computed.Evaluate(ctx, e); err != nil {
-		return err
-	}
-
-	if errs := h.deps.Meta.ValidateEntity(e.ID, e.Type, e.Properties); len(errs) > 0 {
-		// DEC-HWZHA: only HARD errors abort. Soft conditions (a required
-		// property left unset, an out-of-enum value) are tolerated on every
-		// other write path and must stay tolerated here, or a cascade would
-		// be stricter than a direct edit.
-		if hard, _ := partitionValidationErrors(errs); len(hard) > 0 {
-			return newValidationError(hard)
+	// writeAutomationProperties rejects a computed property in set, so the
+	// check needs no computed comparison: next's computed values were just
+	// re-evaluated and may legitimately differ from stored's.
+	_, err := writeAutomationProperties(ctx, h.deps, e, set, func(_, next *entity.Entity) error {
+		if errs := h.deps.Meta.ValidateEntity(next.ID, next.Type, next.Properties); len(errs) > 0 {
+			// DEC-HWZHA: only HARD errors abort. Soft conditions (a required
+			// property left unset, an out-of-enum value) are tolerated on every
+			// other write path and must stay tolerated here, or a cascade would
+			// be stricter than a direct edit.
+			if hard, _ := partitionValidationErrors(errs); len(hard) > 0 {
+				return newValidationError(hard)
+			}
 		}
-	}
-
-	if err := checkUniqueProperties(ctx, h.deps, e, e.ID); err != nil {
-		return err
-	}
-
-	// EnforceCreate, not EnforceUpdate: this row was created moments ago in
-	// this same cascade, so the automation's value is still an ENTRY value —
-	// it must equal the machine's declared entry, not merely be reachable
-	// from it by a legal move. Using EnforceUpdate would wrongly accept a
-	// one-hop jump the create path forbids.
-	if err := h.deps.Transitions.EnforceCreate(ctx, e); err != nil {
-		return err
-	}
-
-	return h.deps.Store.UpdateEntity(ctx, e)
+		// EnforceCreate, not EnforceUpdate: this row was created moments ago
+		// in this same cascade, so the automation's value is still an ENTRY
+		// value — it must equal the machine's declared entry, not merely be
+		// reachable from it by a legal move. Using EnforceUpdate would wrongly
+		// accept a one-hop jump the create path forbids.
+		return h.deps.Transitions.EnforceCreate(ctx, next)
+	})
+	return err
 }
 
 // GetEntity satisfies [autocascade.Host.GetEntity] by forwarding to
@@ -155,9 +141,9 @@ func (h *cascadeHost) GetEntity(ctx context.Context, id string) (*entity.Entity,
 // for freshly built [automation.Result.RelationsToCreate] and trigger
 // relations, so the intent is always create. A store.ErrConflict means
 // the identical triple already exists — an idempotent re-trigger of the
-// same automation, not a lost-update race (cascades run in-process under
-// the write lock). Treat that as a no-op success rather than blindly
-// overwriting it (which was the removed create-then-update fallback,
+// same automation, or a concurrent writer that created the same triple
+// first. Either way the relation exists, so treat it as a no-op success
+// rather than blindly overwriting it (which was the removed create-then-update fallback,
 // BUG-ZWTDH9); no audit record is emitted for the no-op since nothing
 // was written.
 func (h *cascadeHost) WriteRelation(ctx context.Context, r *entity.Relation) error {

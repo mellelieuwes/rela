@@ -20,8 +20,10 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/acl"
 	"github.com/Sourcehaven-BV/rela/internal/appbuild"
 	"github.com/Sourcehaven-BV/rela/internal/appbuild/appbuildtest"
+	"github.com/Sourcehaven-BV/rela/internal/attachment"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
 	"github.com/Sourcehaven-BV/rela/internal/entity"
+	"github.com/Sourcehaven-BV/rela/internal/lock"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 	"github.com/Sourcehaven-BV/rela/internal/store"
@@ -96,7 +98,7 @@ func newAttachFixture(t *testing.T, opts attachOpts) attachFixture {
 	if limit == 0 {
 		limit = store.MaxAttachmentBytes
 	}
-	snap, err := NewAttachmentSnapshot(svc.Store(), svc.EntityManager(), meta, nil, limit)
+	snap, err := NewAttachmentSnapshot(svc.Store(), svc.EntityManager(), lock.NewMemoryLocker(), svc.ACL(), meta, nil, limit)
 	if err != nil {
 		t.Fatalf("NewAttachmentSnapshot: %v", err)
 	}
@@ -116,9 +118,9 @@ func newAttachFixture(t *testing.T, opts attachOpts) attachFixture {
 		ProjectRoot:   t.TempDir(),
 		Attachments: AttachmentDeps{
 			Snapshot:   func() (AttachmentSnapshot, error) { return snap, nil },
+			Uploads:    attachment.NewLimiter(attachment.DefaultMaxUploads),
 			Authorizer: svc.ACL(),
 			Audit:      sink,
-			WriteLock:  &sync.Mutex{},
 		},
 	}
 	srv, err := NewServer(deps, "test", WithPrincipal(principal.Principal{User: "tester", Tool: principal.ToolMCP}))

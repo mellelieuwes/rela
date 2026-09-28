@@ -150,8 +150,7 @@ func (h *attachmentHandler) handleV1GetAttachment(
 func (h *attachmentHandler) handleV1PutAttachment(
 	w http.ResponseWriter, r *http.Request, typeName, plural, entityID, property string,
 ) {
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 	ctx := r.Context()
 	// Capture the state snapshot once: the cap the handler enforces and the
 	// cap the attachment service enforces must come from the same metamodel
@@ -163,6 +162,15 @@ func (h *attachmentHandler) handleV1PutAttachment(
 	if !ok {
 		return
 	}
+
+	// Take an upload slot before reading the body, which is when the bytes
+	// start to use memory and disk.
+	releaseUpload, admitted := h.uploads.TryAcquire()
+	if !admitted {
+		writeAttachmentBusy(w, r, attachment.ErrBusy)
+		return
+	}
+	defer releaseUpload()
 
 	// Cap the request body at ingress: MaxBytesReader makes ParseMultipartForm
 	// and the FormFile read fail with *http.MaxBytesError once the limit is
@@ -261,11 +269,15 @@ func (h *attachmentHandler) auditRejectedUpload(
 }
 
 // writeAttachmentWriteError maps a Service.WriteAttachment failure to the
-// right HTTP status: 413 (size), 409 (at capacity), 403 (ACL deny from the
-// entity update), or 422 (validation / other).
+// right HTTP status: 413 (size), 409 (at capacity), 503 (another write to
+// the property held it too long), 403 (ACL deny from the entity update), or
+// 422 (validation / other).
 func writeAttachmentWriteError(w http.ResponseWriter, r *http.Request, limit int64, err error) {
 	if isAttachmentTooLarge(err) {
 		writeAttachmentTooLarge(w, r, limit)
+		return
+	}
+	if writeAttachmentBusy(w, r, err) {
 		return
 	}
 	if errors.Is(err, attachment.ErrAtCapacity) {
@@ -286,6 +298,18 @@ func writeAttachmentWriteError(w http.ResponseWriter, r *http.Request, limit int
 	slog.Warn("dataentry: attachment write failed", "err", err, "path", r.URL.Path)
 	writeV1Error(w, r, http.StatusUnprocessableEntity, "validation_failed",
 		"Validation failed", err.Error())
+}
+
+// writeAttachmentBusy answers 503 with Retry-After when err is
+// [attachment.ErrBusy], and reports whether it did.
+func writeAttachmentBusy(w http.ResponseWriter, r *http.Request, err error) bool {
+	if !errors.Is(err, attachment.ErrBusy) {
+		return false
+	}
+	w.Header().Set("Retry-After", "1")
+	writeV1Error(w, r, http.StatusServiceUnavailable, "attachment_busy",
+		"Another write to this attachment property is in progress; retry", "")
+	return true
 }
 
 // attachmentCmdTimeout bounds each external scan/transform command. Generous
@@ -372,6 +396,25 @@ func probeAttachmentCommands(meta *metamodel.Metamodel, runner *attachment.CmdRu
 	}
 }
 
+// aclAttachmentAuthorizer re-runs the preflight's `update` decision for the
+// attachment service, under its property lock. A denial is audited like the
+// preflight's and returned as an [acl.ForbiddenError], which the handlers
+// already map to 403.
+type aclAttachmentAuthorizer struct {
+	acl   acl.ACL
+	audit audit.Audit
+}
+
+func (a aclAttachmentAuthorizer) AuthorizeAttachmentWrite(ctx context.Context, e *entityPkg.Entity) error {
+	decision := a.acl.AuthorizeWrite(ctx, translateVerb("update", e.Type, e.ID, e.Face))
+	if decision.Allow {
+		return nil
+	}
+	a.audit.Record(audit.AttachmentWriteDenied(ctx, e.Type, e.ID,
+		decision.Reason, decision.RuleKind, decision.RuleID))
+	return &acl.ForbiddenError{Decision: decision}
+}
+
 // attachmentService builds the shared attachment write-policy service from
 // the App's dependencies and the GIVEN state snapshot. Cheap (a struct
 // wrapper). Takes the snapshot explicitly so the service enforces the same
@@ -381,6 +424,8 @@ func (h *attachmentHandler) attachmentService(s *Schema) (*attachment.Service, e
 		Store:         h.store,
 		Meta:          s.Meta,
 		EntityManager: h.manager,
+		Locker:        h.locker,
+		Authorizer:    aclAttachmentAuthorizer{acl: h.acl(), audit: h.audit()},
 		// Native MIME allowlist + (when a command runner is wired) scan/
 		// transform. h.runner is nil out-of-box → MIME validation only.
 		Processor: attachment.NewPolicyProcessor(s.Meta, h.runner()),
@@ -408,8 +453,7 @@ func filePropertyDef(s *Schema, typeName, property string) metamodel.PropertyDef
 func (h *attachmentHandler) handleV1DeleteAttachment(
 	w http.ResponseWriter, r *http.Request, typeName, entityID, property, fileName string,
 ) {
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 	ctx := r.Context()
 	s := h.schema()
 
@@ -427,7 +471,7 @@ func (h *attachmentHandler) handleV1DeleteAttachment(
 	}
 	propDef := filePropertyDef(s, typeName, property)
 	if err := svc.DeleteAttachment(ctx, entity, propDef, property, fileName); err != nil {
-		if writeForbiddenIfACLDenied(w, err) {
+		if writeAttachmentBusy(w, r, err) || writeForbiddenIfACLDenied(w, err) {
 			return
 		}
 		slog.Warn("dataentry: delete attachment failed", "err", err, "path", r.URL.Path)

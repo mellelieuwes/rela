@@ -192,6 +192,9 @@ type Store struct {
 	// store only after the outer transaction commits — a subscriber must
 	// never observe a write that later rolls back.
 	txPending *txPending
+
+	// keyedSlots caps concurrently held keyed locks; see keyedLockSlots.
+	keyedSlots chan struct{}
 }
 
 // Option configures a Store.
@@ -238,6 +241,7 @@ func New(db DBTX, opts ...Option) (*Store, error) {
 		db:          db,
 		originID:    newOriginID(),
 		subscribers: make(map[int]chan store.Event),
+		keyedSlots:  keyedLockSlots(db),
 	}
 	// The producer's schema is left empty here (producer no-ops) until a
 	// listener is started via Open, which resolves it via resolveSchema. A

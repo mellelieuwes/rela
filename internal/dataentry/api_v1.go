@@ -176,8 +176,7 @@ const (
 
 // handleV1DynamicRoutes routes requests to the appropriate entity handler
 // based on URL. Read operations work against the snapshot returned by
-// a.State() with no locking; write operations take a.writeMu for the
-// duration of the mutation.
+// a.State() with no locking.
 func (a *App) handleV1DynamicRoutes(w http.ResponseWriter, r *http.Request) {
 	// Skip system routes (already handled)
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/")
@@ -283,7 +282,7 @@ func (a *App) handleV1EntityCollection(w http.ResponseWriter, r *http.Request, t
 		// TKT-3I5U: ?dry_run=true evaluates affordances + soft validation
 		// against the candidate WITHOUT persisting, so the create form can
 		// gate fields / options / hidden as the user types. Read-shaped:
-		// dispatched before handleV1CreateEntity acquires the write lock.
+		// dispatched before handleV1CreateEntity, and never persists.
 		if r.URL.Query().Get("dry_run") == "true" {
 			a.write.handleV1DryRunCreate(w, r, typeName, plural)
 			return

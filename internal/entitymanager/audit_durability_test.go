@@ -16,7 +16,8 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/store/memstore"
 )
 
-// failingUpdateStore wraps a store and forces every UpdateEntity call to
+// failingUpdateStore wraps a store and forces every UpdateEntity and
+// UpdateEntityIf call to
 // return a sentinel error. The initial CreateEntity still lands, so this
 // models a transient write failure on the post-automation re-write: the
 // entity is durably on disk but the second persist fails.
@@ -27,6 +28,12 @@ type failingUpdateStore struct {
 
 func (s *failingUpdateStore) UpdateEntity(_ context.Context, _ *entity.Entity) error {
 	return s.err
+}
+
+func (s *failingUpdateStore) UpdateEntityIf(
+	_ context.Context, _ *entity.Entity, _ store.UpdateCondition,
+) (store.EntityVersion, error) {
+	return "", s.err
 }
 
 func newManagerWithStoreAndAudit(

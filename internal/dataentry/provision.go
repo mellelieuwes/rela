@@ -19,19 +19,14 @@ import (
 //
 // # Where it is called
 //
-// At the top of every entity-write handler, INSIDE the writeMu that handler
-// already holds (handleV1CreateEntity, ...Update, ...Delete, the relation
-// handlers, sync ApplyEntity, the Lua-action handler, attachment put/delete).
-// Two properties make that the right seam rather than a wrapping middleware:
+// At the top of every entity-write handler, via withProvision
+// (handleV1CreateEntity, ...Update, ...Delete, the relation handlers, the
+// Lua-action handler, attachment put/delete). Two properties make that the
+// right seam rather than a wrapping middleware:
 //
-//   - writeMu is a plain non-reentrant sync.Mutex taken at the top of all ~14
-//     mutation handlers; a middleware that also took it would self-deadlock,
-//     and routes are not method-split at registration (GET and the mutating
-//     verbs share the /api/v1/ catch-all), so "wrap only writes" is not even
-//     cleanly registrable. Calling here — already under the lock — serializes
-//     the provision create against every other mutation FOR FREE (no second
-//     lock), so two concurrent first-writes from one principal cannot both
-//     create in the same process.
+//   - Routes are not method-split at registration (GET and the mutating verbs
+//     share the /api/v1/ catch-all), so "wrap only writes" is not cleanly
+//     registrable.
 //   - Every write path reaches this helper, so provision covers CRUD, sync,
 //     action, and attachment uniformly — the same anti-bypass property reject
 //     gets from the single AuthorizeWrite choke point.
@@ -96,10 +91,12 @@ func maybeProvision(
 	switch {
 	case err == nil:
 		// created
-	case errors.Is(err, entitymanager.ErrEntityAlreadyExists):
-		// A concurrent first-write (another process, or the IdP webhook) already
-		// provisioned this sub. The unique `principal_property` makes that a
-		// clean conflict: fall through and re-resolve to whatever exists now.
+	case errors.Is(err, entitymanager.ErrEntityAlreadyExists), entitymanager.IsUniqueViolation(err):
+		// A concurrent first-write (another request, another process, or the
+		// IdP webhook) already provisioned this sub. The stubs carry different
+		// minted ids, so the collision surfaces on the unique
+		// `principal_property`, not on the id: fall through and re-resolve to
+		// whatever exists now.
 	default:
 		slog.Warn("dataentry: provision: stub create failed; proceeding as unmatched",
 			"sub", sub, "user_type", pol.UserEntityType, "err", err)

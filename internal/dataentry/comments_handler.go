@@ -771,9 +771,11 @@ type acceptResponse struct {
 // twice.
 //
 // The resolve is a conditional [comments.Service.SetResolved], not a write of
-// the whole comment. writeMu only serializes this process; the flip is what
-// stops two server processes sharing one database from both applying the
-// suggestion, and it leaves a concurrent edit to the comment's body intact.
+// the whole comment. The flip is what stops two requests, on one server
+// process or several sharing a database, from both applying the suggestion,
+// and it leaves a concurrent edit to the comment's body intact. The patch
+// carries the raw row's version, so a body write landing after the reads
+// fails the patch instead of being overwritten.
 func (h *commentsHandler) commentAccept(
 	w http.ResponseWriter, r *http.Request, target comments.Target, commentID string,
 ) {
@@ -785,8 +787,7 @@ func (h *commentsHandler) commentAccept(
 	if h.refuseIfReadOnly(w, r) {
 		return
 	}
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 	ctx := r.Context()
 
 	target, visible, ok := h.gateCommentTargetEntity(w, r, target)
@@ -820,8 +821,8 @@ func (h *commentsHandler) commentAccept(
 	// The accepter reviewed the suggestion against the body they can see. If
 	// that differs from the stored body, writing would splice into text they
 	// never saw, so refuse. Body redaction does not exist today, so in practice
-	// this is a write from outside writeMu (MCP, CLI, another server process)
-	// landing between the two reads; the message says so.
+	// this is a concurrent write landing between the two reads; the message
+	// says so.
 	if raw.Content != visible.Content {
 		writeV1Error(w, r, http.StatusConflict, "suggestion_stale",
 			"The entity body changed while accepting; reload and try again", "")

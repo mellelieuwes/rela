@@ -4,17 +4,17 @@
 //
 // # Why keyed, and not another mutex
 //
-// Rela's pre-existing mutual exclusion is dataentry's writeMu: ONE process-wide
-// mutex covering the whole write surface, held for the duration of a Lua
-// action. It is both too coarse and too narrow.
+// Rela used to have one process-wide write mutex in dataentry, held for the
+// duration of a Lua action. TKT-WE0S2K removed it. It was both too coarse and
+// too narrow.
 //
-// Too coarse, because unrelated writes serialize against each other. A burst of
-// concurrent requests that touch entirely different entities queues up behind
-// one lock and times out.
+// Too coarse, because unrelated writes serialized against each other. A burst
+// of concurrent requests that touched entirely different entities queued up
+// behind one lock and timed out.
 //
-// Too narrow, because it is per-PROCESS. Several rela-server processes against
-// one PostgreSQL database (see docs/postgres-backend.md) share no mutex at all,
-// so it provides nothing there.
+// Too narrow, because it was per-PROCESS. Several rela-server processes
+// against one PostgreSQL database (see docs/postgres-backend.md) shared no
+// mutex at all, so it provided nothing there.
 //
 // A keyed lock addresses both: operations contend only when they name the SAME
 // key, and the postgres backend serializes across processes. That is the whole
@@ -22,6 +22,11 @@
 // plain mutex — a backend that ignored the key would be a correct-looking
 // implementation of a useless contract, which is why locktest asserts that
 // distinct keys do NOT contend.
+//
+// Most writes do not need this seam: the store's compare-and-swap and
+// [store.Transactor.Tx] cover them. The consumer is the attachment service,
+// whose read-modify-write spans blob storage and so cannot sit inside a
+// store transaction.
 //
 // # Not a distributed lock service
 //

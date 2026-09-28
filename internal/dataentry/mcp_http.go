@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/Sourcehaven-BV/rela/internal/attachment"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
@@ -78,9 +77,13 @@ type MCPHost struct {
 	// be built; a configured scan then rejects the upload.
 	AttachmentRunner attachment.CommandRunner
 
-	// WriteLock is the App's mutation mutex. MCP attachment writes hold it so
-	// they serialize with every data-entry write.
-	WriteLock sync.Locker
+	// AttachmentLocker is the App's attachment lock, so MCP attachment writes
+	// and web uploads to one property exclude each other.
+	AttachmentLocker attachment.Locker
+
+	// AttachmentUploads is the App's upload bound, so MCP and web uploads
+	// share one budget.
+	AttachmentUploads *attachment.Limiter
 }
 
 // mcpHost builds the [MCPHost] for this App.
@@ -90,8 +93,9 @@ func mcpHost(a *App) MCPHost {
 			s := a.schema.Current()
 			return s.Meta, maxAttachmentBytes(s)
 		},
-		AttachmentRunner: a.attachmentRunner,
-		WriteLock:        &a.writeMu,
+		AttachmentRunner:  a.attachmentRunner,
+		AttachmentLocker:  a.attachmentLocker,
+		AttachmentUploads: a.attachmentUploads,
 	}
 }
 

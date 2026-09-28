@@ -3,9 +3,11 @@ package dataentry
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Sourcehaven-BV/rela/internal/dataentryconfig"
@@ -260,5 +262,44 @@ func TestApplyRelationsModern_SelfLoopShapeConflict(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "shape_conflict") {
 		t.Errorf("response should include shape_conflict code, got: %s", rec.Body.String())
+	}
+}
+
+// TestApplyRelationsModern_ConcurrentPatchesNever500 races PATCHes that add,
+// update and drop the same edge. Each reconciler reads the edge set without a
+// lock, so another request can create or delete an edge between its read and
+// its write. Those races must resolve to the desired state, never to a 500.
+func TestApplyRelationsModern_ConcurrentPatchesNever500(t *testing.T) {
+	app := newDirectionTestApp(t)
+	sourceID, targetID := seedDirectionFixture(t, app)
+
+	keep := `{"relations":{"blockedBy":{"data":[{"type":"feature","id":"` + sourceID +
+		`","meta":{"reason":"r%d"}}]}}}`
+	drop := `{"relations":{"blockedBy":{"data":[]}}}`
+
+	const racers = 16
+	codes := make(chan int, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Go(func() {
+			body := drop
+			if i%2 == 0 {
+				body = fmt.Sprintf(keep, i)
+			}
+			req := httptest.NewRequest(http.MethodPatch, "/api/v1/features/"+targetID, strings.NewReader(body))
+			rec := httptest.NewRecorder()
+			app.write.handleV1UpdateEntity(rec, req, "feature", "features", targetID)
+			if rec.Code >= http.StatusInternalServerError {
+				t.Errorf("concurrent relation PATCH: got %d: %s", rec.Code, rec.Body.String())
+			}
+			codes <- rec.Code
+		})
+	}
+	wg.Wait()
+	close(codes)
+	for code := range codes {
+		if code != http.StatusOK && code != http.StatusConflict {
+			t.Errorf("concurrent relation PATCH: got %d, want 200 or 409", code)
+		}
 	}
 }

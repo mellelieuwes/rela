@@ -1049,6 +1049,11 @@ jobs:
             ./internal/cli/
           go test -race -tags postgres -run 'TestStoreEventBridge' ./internal/dataentry/
           go test -race -tags postgres ./internal/docscli/
+          # Write concurrency without a process-wide lock (TKT-WE0S2K): the
+          # manager's check-then-writes and webhook appends, raced within one
+          # process and across two stores on one schema.
+          go test -race -tags postgres -run 'TestConcurrency_' ./internal/entitymanager/
+          go test -race -tags postgres -run 'TestWebhookConflict' ./internal/dataentry/
 
   # Cross-compile every (GOOS, build-tag) combination GoReleaser ships so a
   # platform-specific compile break (e.g. a unix-only syscall used without a
@@ -1136,6 +1141,9 @@ jobs:
             ./internal/appbuild/... \
             ./internal/dataentry/... \
             ./internal/cli/...
+          # The manager's write-concurrency tests race goroutines on purpose
+          # (TKT-WE0S2K), so they run with -race here too.
+          go test -race -tags sqlite -run 'TestConcurrency_' ./internal/entitymanager/
 
   cross-compile:
     name: Cross-Compile (${{ matrix.goos }}/${{ matrix.tags || 'default' }})

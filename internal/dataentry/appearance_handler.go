@@ -17,7 +17,7 @@ import (
 // propagates, and the same viewReader seam the App used so the settings
 // page's relation-default candidates stay row-gated + field-redacted
 // (DEC-ZBI39P). Every write here lands on a self-synchronized service —
-// no writeMu, no entitymanager.
+// no entitymanager.
 type appearanceHandler struct {
 	schema func() *Schema
 	// services returns the read bundle; the settings page's

@@ -29,7 +29,7 @@ import (
 // bundle as closures so every operation reads the current published
 // state, and App's shared read gate as a closure so the uniform-404
 // behavior can't drift between the read and view paths. This surface is
-// read-only — no writeMu, no entitymanager.
+// read-only — no entitymanager.
 type viewsHandler struct {
 	schema      func() *Schema
 	store       store.Store

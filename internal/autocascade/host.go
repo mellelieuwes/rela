@@ -43,13 +43,15 @@ type Host interface {
 	// validation, minus the post-write automation event."
 	CreateEntity(ctx context.Context, entityType string, opts CreateEntityOptions) (*entity.Entity, error)
 
-	// WriteEntity upserts an *existing* entity to the store without
-	// any further processing (no ID generation, no template, no
-	// validation, no automation). Runner uses it to persist property
-	// changes from [automation.Result.PropertiesSet] onto an entity
-	// that already went through [Host.CreateEntity] earlier in the
-	// cascade.
-	WriteEntity(ctx context.Context, e *entity.Entity) error
+	// WriteEntity persists set — the [automation.Result.PropertiesSet] of
+	// an on-create automation — onto e, an entity that already went through
+	// [Host.CreateEntity] earlier in the cascade. No ID generation, no
+	// template, no automation.
+	//
+	// It takes the property set rather than a whole entity because the row
+	// may have changed since the cascade created it: the host applies set to
+	// the STORED row, so a concurrent writer's change is kept.
+	WriteEntity(ctx context.Context, e *entity.Entity, set map[string]string) error
 
 	// GetEntity reads an entity by ID. Runner uses it to verify that
 	// targets of automation-generated relations exist before

@@ -228,24 +228,35 @@ func TestProvision_TriggeringWriteSeesOwnStub(t *testing.T) {
 }
 
 func TestProvision_ConcurrentFirstWritesCreateOne(t *testing.T) {
-	// AC3: two concurrent first-writes from one sub create exactly one stub. In
-	// one process writeMu serializes them; the loser's provision sees the stub
-	// already exists (ErrEntityAlreadyExists), tolerates it, and re-resolves.
+	// AC3: concurrent first-writes from one sub create exactly one stub, and
+	// every write succeeds. They run concurrently (no write lock,
+	// TKT-WE0S2K): the unique `sub` property admits one stub, and each loser's
+	// provision sees the unique violation, tolerates it, and re-resolves to
+	// the winner's stub.
 	app, st := provisionApp(t)
 	router := app.NewRouter()
 
 	const n = 8
 	var wg sync.WaitGroup
+	codes := make([]int, n)
+	bodies := make([]string, n)
 	wg.Add(n)
-	for range n {
+	for i := range n {
 		go func() {
 			defer wg.Done()
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, provReq(t, http.MethodPost, "/api/v1/tickets",
 				`{"properties":{"title":"x"}}`))
+			codes[i], bodies[i] = rec.Code, rec.Body.String()
 		}()
 	}
 	wg.Wait()
+
+	for i, code := range codes {
+		if code < 200 || code >= 300 {
+			t.Errorf("first-write %d got %d, want 2xx; body=%s", i, code, bodies[i])
+		}
+	}
 
 	if got := len(listPersonsBySub(t, st)); got != 1 {
 		t.Fatalf("concurrent first-writes created %d stubs for one sub, want exactly 1", got)

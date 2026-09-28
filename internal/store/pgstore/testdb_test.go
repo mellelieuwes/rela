@@ -107,8 +107,15 @@ func adminConn(tb skipper) *pgxpool.Pool {
 // rela_seq sequence fresh per test and allow parallel subtests.
 func newScopedPool(tb skipper) *pgxpool.Pool {
 	tb.Helper()
+	return newScopedPoolSized(tb, defaultTestMaxConns)
+}
+
+// newScopedPoolSized is [newScopedPool] with an explicit pool size, for tests
+// whose subject depends on it (the keyed-lock capacity is half the pool).
+func newScopedPoolSized(tb skipper, maxConns int32) *pgxpool.Pool {
+	tb.Helper()
 	admin := adminConn(tb)
-	pool, schema, err := createScopedPool(admin)
+	pool, schema, err := createScopedPoolSized(admin, maxConns)
 	if err != nil {
 		tb.Fatalf("scoped pool: %v", err)
 	}
@@ -124,6 +131,16 @@ func newScopedPool(tb skipper) *pgxpool.Pool {
 // f.Helper/f.Cleanup are forbidden). The caller owns dropping the schema and
 // closing the pool; the returned schema name identifies it.
 func createScopedPool(admin *pgxpool.Pool) (*pgxpool.Pool, string, error) {
+	return createScopedPoolSized(admin, defaultTestMaxConns)
+}
+
+// defaultTestMaxConns caps each scoped pool. The conformance suite creates
+// ~100 pools and active fuzzing creates many more, so each pool's footprint
+// must stay small to keep the suite well under the server's max_connections.
+// Production wiring uses its own pool sizing.
+const defaultTestMaxConns = 2
+
+func createScopedPoolSized(admin *pgxpool.Pool, maxConns int32) (*pgxpool.Pool, string, error) {
 	ctx := context.Background()
 	schema := fmt.Sprintf("relatest_%d_%d", os.Getpid(), schemaCounter.Add(1))
 	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+pgQuoteIdent(schema)); err != nil {
@@ -136,10 +153,7 @@ func createScopedPool(admin *pgxpool.Pool) (*pgxpool.Pool, string, error) {
 	}
 	// Pin every connection to the test schema; keep public for pg_trgm.
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	// The conformance suite creates ~100 pools and active fuzzing creates many
-	// more; cap each pool's footprint so the suite stays well under the
-	// server's max_connections. Production wiring uses its own pool sizing.
-	cfg.MaxConns = 2
+	cfg.MaxConns = maxConns
 	cfg.MinConns = 0
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)

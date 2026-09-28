@@ -204,8 +204,8 @@ func (r *Runner) runCreatedEntityAutomation(
 		for prop, val := range newAutoResult.PropertiesSet {
 			created.SetString(prop, val)
 		}
-		// Re-write entity with updated properties.
-		if err := host.WriteEntity(ctx, created); err != nil {
+		// Persist the automation's properties onto the stored row.
+		if err := host.WriteEntity(ctx, created, newAutoResult.PropertiesSet); err != nil {
 			outcome.Errors = append(outcome.Errors,
 				fmt.Sprintf("failed to update automation entity %s: %v", created.ID, err))
 		}

@@ -1,12 +1,13 @@
 package mcp
 
 import (
-	"sync"
 	"testing"
 
 	"github.com/Sourcehaven-BV/rela/internal/appbuild"
 	"github.com/Sourcehaven-BV/rela/internal/appbuild/appbuildtest"
+	"github.com/Sourcehaven-BV/rela/internal/attachment"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
+	"github.com/Sourcehaven-BV/rela/internal/lock"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/store"
 )
@@ -54,15 +55,16 @@ func testAttachmentDeps(
 	t *testing.T, svc *appbuild.Services, meta *metamodel.Metamodel, sink audit.Audit,
 ) AttachmentDeps {
 	t.Helper()
-	snap, err := NewAttachmentSnapshot(svc.Store(), svc.EntityManager(), meta, nil, store.MaxAttachmentBytes)
+	snap, err := NewAttachmentSnapshot(
+		svc.Store(), svc.EntityManager(), lock.NewMemoryLocker(), svc.ACL(), meta, nil, store.MaxAttachmentBytes)
 	if err != nil {
 		t.Fatalf("NewAttachmentSnapshot: %v", err)
 	}
 	return AttachmentDeps{
 		Snapshot:   func() (AttachmentSnapshot, error) { return snap, nil },
+		Uploads:    attachment.NewLimiter(attachment.DefaultMaxUploads),
 		Authorizer: svc.ACL(),
 		Audit:      sink,
-		WriteLock:  &sync.Mutex{},
 	}
 }
 

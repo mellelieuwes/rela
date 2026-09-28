@@ -40,8 +40,8 @@ type WebhookClaims struct {
 const webhookMaxBody = 64 << 10 // 64 KiB
 
 // webhookActionTimeout bounds the provisioning action (which fetches the user
-// from the IdP over HTTP, then upserts). Longer than the interactive
-// actionTimeout because the network round-trip to the IdP dominates.
+// from the IdP over HTTP, then upserts). Tighter than lua.DefaultTimeout so a
+// slow IdP answers the webhook sender before it gives up and redelivers.
 const webhookActionTimeout = 15 * time.Second
 
 // webhookDedupTTL is how long a processed webhook id is remembered so a redelivery
@@ -91,7 +91,7 @@ func (a *App) registerWebhookRoutes(mux *http.ServeMux) {
 		return
 	}
 	// The handler lives on the receiver; the App only supplies the dispatch
-	// closure (which routes through the writeHandler: engine, schema, writeMu). This
+	// closure (which routes through the writeHandler: engine, schema). This
 	// keeps the HTTP-flow logic off the (already large) App type.
 	rec := a.webhook
 	mux.HandleFunc("POST /webhooks/idp", func(w http.ResponseWriter, r *http.Request) {
@@ -152,8 +152,9 @@ func (rec *webhookReceiver) handle(
 }
 
 // dispatchWebhookAction runs the provisioning action with the webhook's claims as
-// params, under the webhook-receiver principal. Serialized against other
-// mutations via writeMu (the action upserts an entity), matching handleV1Action.
+// params, under the webhook-receiver principal. It runs concurrently with other
+// writes, like handleV1Action; an upsert keyed on a `unique:` property stays
+// single because the manager checks uniqueness and writes inside one store.Tx.
 // A free function taking the writeHandler explicitly (it is dispatch wiring,
 // not a route handler).
 func dispatchWebhookAction(ctx context.Context, h *writeHandler, actionID string, claims WebhookClaims) error {
@@ -186,9 +187,6 @@ func dispatchWebhookAction(ctx context.Context, h *writeHandler, actionID string
 		"user_id": claims.UserID,
 		"org_id":  claims.OrgID,
 	}
-
-	h.writeMu.Lock()
-	defer h.writeMu.Unlock()
 
 	// TKT-YH52OM: the webhook path resolves the SAME `actions:` entry as the
 	// HTTP endpoint, so it honors the same `capabilities:` declaration. This

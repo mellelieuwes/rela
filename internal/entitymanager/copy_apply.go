@@ -8,6 +8,7 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/automation"
 	"github.com/Sourcehaven-BV/rela/internal/entity"
+	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/store"
 )
 
@@ -18,13 +19,25 @@ import (
 // transaction on pg. That is why the plan is fully resolved beforehand —
 // this function reads nothing it did not already decide, so there is no
 // temptation to reach for a handle it should not use.
-func applyCopy(ctx context.Context, view store.Store, plan *copyPlan) (*CopyResult, error) {
+func applyCopy(
+	ctx context.Context, meta *metamodel.Metamodel, view store.Store, plan *copyPlan,
+) (*CopyResult, error) {
+	// The plan's unique check ran outside the transaction; this one is the
+	// check that holds, because it runs on the view with the write.
+	if err := checkUniqueProperties(ctx, meta, view, plan.entity, plan.entity.ID); err != nil {
+		return nil, err
+	}
 	if plan.created {
 		if err := view.CreateEntity(ctx, plan.entity); err != nil {
 			return nil, fmt.Errorf("entitymanager: copy %q: create target face: %w",
 				plan.name, err)
 		}
-	} else if err := view.UpdateEntity(ctx, plan.entity); err != nil {
+	} else if _, err := view.UpdateEntityIf(ctx, plan.entity, store.UpdateCondition{
+		// The target was merged from plan.existing, read before the
+		// transaction. Pinning the write to that read makes a concurrent
+		// edit of the target fail the copy instead of being overwritten.
+		ExpectedVersion: store.VersionOf(plan.existing),
+	}); err != nil {
 		return nil, fmt.Errorf("entitymanager: copy %q: write target face: %w",
 			plan.name, err)
 	}

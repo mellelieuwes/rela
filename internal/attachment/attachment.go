@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
@@ -52,14 +53,48 @@ type EntityPatcher interface {
 	PatchEntity(ctx context.Context, id string, p entity.Patch) (*entity.UpdateResult, error)
 }
 
-// Deps is the dependency bundle [New] requires. Store, Meta and
-// EntityManager are mandatory; [New] returns an error if any is nil.
-// Processor is optional — when nil the service uses [NoopProcessor] and the
-// write path stays zero-copy.
+// Locker is the keyed lock the service takes around each write to one
+// (entity, property). internal/lock supplies the implementations: a
+// BackendLocker when several processes share one store, a MemoryLocker
+// otherwise.
+type Locker interface {
+	// Acquire blocks until key is held or ctx is done, and returns an
+	// idempotent release. A wait cut short by ctx returns an error wrapping
+	// ctx.Err().
+	Acquire(ctx context.Context, key string) (release func(), err error)
+}
+
+// WriteAuthorizer decides whether the caller in ctx may still change e's
+// attachments. The service asks it under the property lock, right before the
+// store is touched: callers authorize up front too, but a slow upload or scan
+// separates that check from the write, and the entity's state or the caller's
+// grants may change in between. It returns nil to allow.
+type WriteAuthorizer interface {
+	AuthorizeAttachmentWrite(ctx context.Context, e *entity.Entity) error
+}
+
+// AllowAllWrites is the named opt-out [WriteAuthorizer] for callers on the
+// operator's shell (the CLI), which has no ACL to consult.
+type AllowAllWrites struct{}
+
+// AuthorizeAttachmentWrite implements [WriteAuthorizer] and allows every write.
+func (AllowAllWrites) AuthorizeAttachmentWrite(context.Context, *entity.Entity) error { return nil }
+
+// Deps is the dependency bundle [New] requires. Store, Meta, EntityManager,
+// Locker and Authorizer are mandatory; [New] returns an error if any is nil.
+// Processor is optional — when nil the service uses [NoopProcessor].
 type Deps struct {
 	Store         store.Store
 	Meta          *metamodel.Metamodel
 	EntityManager EntityPatcher
+
+	// Locker serializes writers to one (entity, property); see
+	// [Service.WriteAttachment].
+	Locker Locker
+
+	// Authorizer re-checks each write under the property lock. Use
+	// [AllowAllWrites] where there is no ACL.
+	Authorizer WriteAuthorizer
 
 	// Processor inspects/rewrites attachment bytes before they are persisted
 	// (scan, MIME validation, transform). Optional; defaults to [NoopProcessor].
@@ -84,6 +119,12 @@ func New(d Deps) (*Service, error) {
 	}
 	if d.EntityManager == nil {
 		return nil, errors.New("attachment: EntityManager is required")
+	}
+	if d.Locker == nil {
+		return nil, errors.New("attachment: Locker is required")
+	}
+	if d.Authorizer == nil {
+		return nil, errors.New("attachment: Authorizer is required")
 	}
 	if d.Processor == nil {
 		d.Processor = NoopProcessor{}
@@ -181,44 +222,65 @@ var ErrAtCapacity = errors.New("attachment: property already holds the maximum n
 // the other files on the property). A store failure mid-write therefore
 // leaves the existing attachment intact.
 //
-// Cap enforcement (the `max` ceiling) reads the current file set then
-// writes, which is not atomic — it assumes writers to a given
-// (entity, property) are serialized. The HTTP path holds a per-App write
-// mutex; concurrent CLI invocations against the same property could race
-// and overshoot the cap. That's acceptable for the single-writer CLI use.
+// The cap (`max`) and the stamped file list are read-modify-writes over the
+// property's file set, so the list-resolve-write-prune-stamp sequence runs
+// under the keyed lock for (entity, property). It works across processes
+// when Deps.Locker is backed by the shared store. The slow steps stay outside the
+// lock: the processor (a scan may take up to a minute) and reading r, which
+// is spooled to a temporary file first, so a slow client cannot hold the lock.
 func (s *Service) WriteAttachment(
 	ctx context.Context, e *entity.Entity, propDef metamodel.PropertyDef, propName, rawFileName string, r io.Reader,
 ) (*Result, error) {
 	maxCount := propDef.FileMax()
 
+	// Fail fast on a full property before reading or scanning any bytes. The
+	// check is repeated under the lock below, where it counts.
 	existing, err := s.attachmentFileNames(ctx, e.ID, propName)
 	if err != nil {
 		return nil, fmt.Errorf("list attachments: %w", err)
 	}
-
 	fileName, err := resolveAttachName(rawFileName, existing, maxCount)
 	if err != nil {
 		return nil, err
 	}
 
-	// Inspect / transform the bytes before persisting. With the default
-	// no-op processor this threads r straight through (zero-copy); a real
-	// processor may buffer (when it needs the full file), reject the upload
-	// (wrapping ErrRejected), or rewrite the stream and the file name.
+	// Inspect / transform the bytes before persisting. A processor may buffer
+	// (when it needs the full file), reject the upload (wrapping
+	// ErrRejected), or rewrite the stream and the file name.
 	pc := ProcessContext{EntityID: e.ID, EntityType: e.Type, Property: propName, FileName: fileName}
 	r, fileName, err = runProcessor(ctx, s.deps.Processor, pc, r, store.MaxAttachmentBytes)
 	if err != nil {
 		return nil, err
 	}
-	// A transform that changed the name may collide with an existing file or
-	// exceed the cap; re-resolve against the current set.
+	spool, err := spoolAttachment(r)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = spool.Close()
+		_ = os.Remove(spool.Name())
+	}()
+
+	release, err := s.lockForWrite(ctx, e, propName)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	existing, err = s.attachmentFileNames(ctx, e.ID, propName)
+	if err != nil {
+		return nil, fmt.Errorf("list attachments: %w", err)
+	}
+	// Resolve against the set as it is now: a concurrent upload may have
+	// filled the property or taken the name since the check above, and a
+	// transform may have changed the name.
 	fileName, err = resolveAttachName(fileName, existing, maxCount)
 	if err != nil {
 		return nil, err
 	}
 
 	// Write the new bytes first. On failure the existing files are untouched.
-	if err = s.deps.Store.AttachFile(ctx, e.ID, propName, fileName, r); err != nil {
+	if err = s.deps.Store.AttachFile(ctx, e.ID, propName, fileName, spool); err != nil {
 		return nil, fmt.Errorf("store attachment: %w", err)
 	}
 
@@ -256,19 +318,94 @@ func (s *Service) WriteAttachment(
 	return &Result{Path: key, FileName: fileName, Entity: res.Entity}, nil
 }
 
+// lockWait bounds how long a writer waits for another writer to the same
+// (entity, property). The holder never scans or reads an upload under the
+// lock, but its stamp runs the entity's on-update automations, whose Lua may
+// take up to the default script timeout (30s). The wait is twice that, so a
+// holder that is still making progress does not cause a 503.
+const lockWait = 60 * time.Second
+
+// ErrBusy is returned when another writer held the same (entity, property)
+// for longer than the service waits, and stands for a full [Limiter] at the
+// upload handlers. Nothing was written; the caller may retry. The HTTP
+// handler maps it to a 503.
+var ErrBusy = errors.New("attachment: another write to this property is in progress")
+
+// lockForWrite takes the property lock and then re-authorizes the write, so
+// the decision holds for everything done under the lock. On a denial the lock
+// is released and the authorizer's error returned.
+func (s *Service) lockForWrite(ctx context.Context, e *entity.Entity, propName string) (func(), error) {
+	release, err := s.lockProperty(ctx, e.ID, propName)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.deps.Authorizer.AuthorizeAttachmentWrite(ctx, e); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
+// lockProperty acquires the keyed lock serializing writers to one
+// (entity, property). The deadline applies to the wait only; the returned
+// release must be called once the write is done.
+func (s *Service) lockProperty(ctx context.Context, entityID, propName string) (func(), error) {
+	waitCtx, cancel := context.WithTimeout(ctx, lockWait)
+	defer cancel()
+	release, err := s.deps.Locker.Acquire(waitCtx, "attachment/"+entityID+"/"+propName)
+	if err != nil {
+		// Only our own wait bound is "busy"; a caller that gave up is not.
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil, fmt.Errorf("%w (%s/%s)", ErrBusy, entityID, propName)
+		}
+		return nil, fmt.Errorf("lock attachment property %s/%s: %w", entityID, propName, err)
+	}
+	return release, nil
+}
+
+// spoolAttachment copies r to a temporary file and rewinds it. The copy is
+// capped at [store.MaxAttachmentBytes], the same limit every store enforces.
+func spoolAttachment(r io.Reader) (*os.File, error) {
+	f, err := os.CreateTemp("", "rela-attachment-*")
+	if err != nil {
+		return nil, fmt.Errorf("spool attachment: %w", err)
+	}
+	fail := func(err error) (*os.File, error) {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, err
+	}
+	if _, err := io.Copy(f, store.CapAttachmentReader(r, store.MaxAttachmentBytes)); err != nil {
+		if errors.Is(err, store.ErrAttachmentTooLarge) {
+			return fail(fmt.Errorf("store attachment: %w", err))
+		}
+		return fail(fmt.Errorf("spool attachment: %w", err))
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fail(fmt.Errorf("spool attachment: %w", err))
+	}
+	return f, nil
+}
+
 // DeleteAttachment removes one file from a property and re-stamps it,
-// shared with the HTTP delete handler. The caller is responsible for ACL
-// gating; this performs the store delete + property re-stamp + persist.
+// shared with the HTTP delete handler. The caller gates the read; the write is
+// authorized by Deps.Authorizer under the property lock. This performs the
+// store delete + property re-stamp + persist.
 // Deleting a file that is not there still re-stamps and succeeds.
 func (s *Service) DeleteAttachment(
 	ctx context.Context, e *entity.Entity, propDef metamodel.PropertyDef, propName, fileName string,
 ) error {
-	_, err := s.deleteFile(ctx, e, propDef, propName, fileName)
+	release, err := s.lockForWrite(ctx, e, propName)
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = s.deleteFile(ctx, e, propDef, propName, fileName)
 	return err
 }
 
 // deleteFile is [Service.DeleteAttachment], also reporting whether the file
-// was there.
+// was there. The caller holds the property's lock.
 func (s *Service) deleteFile(
 	ctx context.Context, e *entity.Entity, propDef metamodel.PropertyDef, propName, fileName string,
 ) (bool, error) {
@@ -311,15 +448,20 @@ func (s *Service) Detach(ctx context.Context, entityID, property, fileName strin
 // the name of the file it removed. A named file is deleted idempotently: when
 // it is not there, DetachFile succeeds and returns "". An empty fileName
 // removes the property's only file, and errors when the property holds none
-// or several (the caller must disambiguate). The caller is responsible for
-// ACL gating.
+// or several (the caller must disambiguate). The caller gates the read; the
+// write is authorized by Deps.Authorizer under the property lock.
 func (s *Service) DetachFile(
 	ctx context.Context, e *entity.Entity, propDef metamodel.PropertyDef, property, fileName string,
 ) (string, error) {
+	release, err := s.lockForWrite(ctx, e, property)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	if fileName == "" {
-		existing, err := s.attachmentFileNames(ctx, e.ID, property)
-		if err != nil {
-			return "", fmt.Errorf("list attachments: %w", err)
+		existing, listErr := s.attachmentFileNames(ctx, e.ID, property)
+		if listErr != nil {
+			return "", fmt.Errorf("list attachments: %w", listErr)
 		}
 		switch len(existing) {
 		case 0:

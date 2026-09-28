@@ -71,7 +71,7 @@ func (h *stubHost) CreateEntity(ctx context.Context, entityType string, opts aut
 	return e, nil
 }
 
-func (h *stubHost) WriteEntity(ctx context.Context, e *entity.Entity) error {
+func (h *stubHost) WriteEntity(ctx context.Context, e *entity.Entity, _ map[string]string) error {
 	h.Calls = append(h.Calls, "WriteEntity:"+e.ID)
 	if h.store == nil {
 		return nil

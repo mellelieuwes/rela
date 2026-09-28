@@ -8,14 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Sourcehaven-BV/rela/internal/appbuild"
+	"github.com/Sourcehaven-BV/rela/internal/attachment"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
 	"github.com/Sourcehaven-BV/rela/internal/dataentry"
+	"github.com/Sourcehaven-BV/rela/internal/lock"
 	"github.com/Sourcehaven-BV/rela/internal/project"
 	"github.com/Sourcehaven-BV/rela/internal/script"
 	"github.com/Sourcehaven-BV/rela/internal/storage"
@@ -99,7 +100,10 @@ func assertNoLuaTools(t *testing.T, svc *appbuild.Services) {
 	t.Helper()
 	ctx := context.Background()
 
-	srv, err := newRemoteMCPServer(svc, dataentry.MCPHost{WriteLock: &sync.Mutex{}})
+	srv, err := newRemoteMCPServer(svc, dataentry.MCPHost{
+		AttachmentLocker:  lock.NewMemoryLocker(),
+		AttachmentUploads: attachment.NewLimiter(attachment.DefaultMaxUploads),
+	})
 	if err != nil {
 		t.Fatalf("newRemoteMCPServer: %v", err)
 	}

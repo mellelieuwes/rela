@@ -16,7 +16,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"unicode/utf8"
 
 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -65,7 +64,7 @@ const largeRequestSlots = 2
 // largeRequestGate queues HTTP requests that may be larger than
 // [smallRequestBytes] BEFORE the go-sdk reads their body. The SDK buffers the
 // whole body, and the tool then holds several copies of an upload while it
-// waits for the write lock, so unbounded concurrency would let any
+// scans and writes it, so unbounded concurrency would let any
 // authenticated caller exhaust memory. A queued request holds a connection,
 // not memory, which is how the web upload path behaves too. A request with no
 // Content-Length counts as large.
@@ -104,6 +103,10 @@ type AttachmentDeps struct {
 	// the tool call.
 	Snapshot func() (AttachmentSnapshot, error)
 
+	// Uploads bounds concurrent uploads. Share the process's one
+	// [attachment.Limiter] with every other upload path.
+	Uploads *attachment.Limiter
+
 	// Authorizer decides the `update` write an attachment change amounts to,
 	// BEFORE any bytes are stored. The manager authorizes again when it
 	// stamps the property, but by then the bytes have landed: a denied caller
@@ -113,13 +116,6 @@ type AttachmentDeps struct {
 	// Audit records denied and rejected writes. Nil: rejected — use
 	// [audit.Nop] for "record nothing".
 	Audit audit.Audit
-
-	// WriteLock serializes attachment writes. [attachment.Service.WriteAttachment]
-	// decides cap and replace from a read of the current files, so two
-	// concurrent writers to one property could overshoot `max` or orphan a
-	// file. The remote wiring passes the data-entry App's write mutex, so MCP
-	// writes serialize with web writes too.
-	WriteLock sync.Locker
 }
 
 // AttachmentSnapshot is one consistent view of the attachment policy.
@@ -145,14 +141,24 @@ type WriteAuthorizer interface {
 // st is the raw store: [attachment.Service] reads and writes attachment bytes
 // through it. The tools only reach it after the gated entity read has
 // admitted the caller.
+//
+// locker serializes writers to one (entity, property). Pass the locker every
+// other attachment writer in the process uses, so MCP and web writes to one
+// property exclude each other. authz re-authorizes each write under that lock;
+// pass the same authorizer as [AttachmentDeps.Authorizer].
 func NewAttachmentSnapshot(
-	st store.Store, em attachment.EntityPatcher, meta *metamodel.Metamodel,
-	runner attachment.CommandRunner, limit int64,
+	st store.Store, em attachment.EntityPatcher, locker attachment.Locker, authz WriteAuthorizer,
+	meta *metamodel.Metamodel, runner attachment.CommandRunner, limit int64,
 ) (AttachmentSnapshot, error) {
+	if authz == nil {
+		return AttachmentSnapshot{}, errors.New("mcp: NewAttachmentSnapshot: authz is required")
+	}
 	svc, err := attachment.New(attachment.Deps{
 		Store:         st,
 		Meta:          meta,
 		EntityManager: em,
+		Locker:        locker,
+		Authorizer:    attachmentAuthorizer{authz},
 		Processor:     attachment.NewPolicyProcessor(meta, runner),
 	})
 	if err != nil {
@@ -161,16 +167,31 @@ func NewAttachmentSnapshot(
 	return AttachmentSnapshot{Meta: meta, Service: svc, MaxUploadBytes: min(limit, MaxUploadBytes)}, nil
 }
 
+// attachmentAuthorizer adapts a [WriteAuthorizer] to the attachment
+// service's re-check under the property lock.
+type attachmentAuthorizer struct{ authz WriteAuthorizer }
+
+func (a attachmentAuthorizer) AuthorizeAttachmentWrite(ctx context.Context, e *entity.Entity) error {
+	decision := a.authz.AuthorizeWrite(ctx, acl.WriteRequest{
+		Op:      acl.OpUpdate,
+		Subject: acl.NewEntitySubject(e.Type, e.ID, e.Face),
+	})
+	if decision.Allow {
+		return nil
+	}
+	return &acl.ForbiddenError{Decision: decision}
+}
+
 func (d AttachmentDeps) validate() error {
 	switch {
 	case d.Snapshot == nil:
 		return errors.New("mcp: Deps.Attachments.Snapshot is required")
+	case d.Uploads == nil:
+		return errors.New("mcp: Deps.Attachments.Uploads is required")
 	case d.Authorizer == nil:
 		return errors.New("mcp: Deps.Attachments.Authorizer is required")
 	case d.Audit == nil:
 		return errors.New("mcp: Deps.Attachments.Audit is required")
-	case d.WriteLock == nil:
-		return errors.New("mcp: Deps.Attachments.WriteLock is required")
 	}
 	return nil
 }
@@ -535,9 +556,6 @@ func (h attachmentHandler) handleAttachFile(
 		return errorResult(err.Error()), nil
 	}
 
-	h.deps.WriteLock.Lock()
-	defer h.deps.WriteLock.Unlock()
-
 	snap, err := h.deps.Snapshot()
 	if err != nil {
 		slog.Error("mcp: attachment services unavailable", "err", err)
@@ -547,6 +565,11 @@ func (h attachmentHandler) handleAttachFile(
 	if denied != nil {
 		return denied, nil
 	}
+	release, admitted := h.deps.Uploads.TryAcquire()
+	if !admitted {
+		return errorResult("too many uploads in progress; retry shortly"), nil
+	}
+	defer release()
 
 	// Refuse an oversize upload from its encoded length, before decoding.
 	// DecodedLen would round up to a multiple of 3 and refuse a file just at
@@ -615,9 +638,6 @@ func (h attachmentHandler) handleDeleteAttachment(
 	if err != nil {
 		return errorResult(err.Error()), nil
 	}
-
-	h.deps.WriteLock.Lock()
-	defer h.deps.WriteLock.Unlock()
 
 	snap, err := h.deps.Snapshot()
 	if err != nil {

@@ -15,15 +15,14 @@ import (
 )
 
 // The PATCH path's If-Match used to be a check-then-write: read the entity,
-// compare its ETag to the header, then write — correct only because writeMu
-// serialized the whole handler. TKT-34XS2R moved the real enforcement into
-// the store, which re-verifies the precondition atomically with the write.
+// compare its ETag to the header, then write — correct only while a
+// process-wide write lock serialized the whole handler. TKT-34XS2R moved the
+// real enforcement into the store, which re-verifies the precondition
+// atomically with the write, and TKT-WE0S2K removed the lock.
 //
-// These tests target the store-level guarantee specifically, because the
-// handler-level one is untestable in the way that matters: writeMu makes
-// concurrent handler calls serialize, so a test that drives two handlers
-// concurrently would pass whether or not the CAS existed. Driving the seam
-// the handler now depends on is what actually discriminates.
+// These tests target the store-level guarantee specifically: they inject the
+// interleaving write deterministically at the seam the handler depends on,
+// rather than hoping two concurrent handler calls happen to interleave.
 
 // patchBody issues a PATCH through the handler and returns the recorder.
 func patchBody(app *App, body string, hdr http.Header) *httptest.ResponseRecorder {
@@ -108,14 +107,13 @@ func TestV1Patch_SetAndUnsetSameKeyEndsUnset(t *testing.T) {
 }
 
 // TestV1Patch_StoreRejectsWriteRacingTheHandlerRead is the point of the
-// migration. It reproduces the interleaving writeMu cannot prevent across
-// processes: the handler reads (and would compare If-Match), then ANOTHER
-// writer lands, then the handler writes. The store must reject the write
-// rather than clobber the interloper.
+// migration. It reproduces the interleaving: the handler reads (and would
+// compare If-Match), then ANOTHER writer lands, then the handler writes. The
+// store must reject the write rather than clobber the interloper.
 //
 // The concurrent write is injected through the store directly, which is
-// exactly what a second rela-server process looks like from here — it holds
-// no share of this process's writeMu.
+// exactly what a concurrent request or a second rela-server process looks
+// like from here.
 func TestV1Patch_StoreRejectsWriteRacingTheHandlerRead(t *testing.T) {
 	app := newTestAppV1(t)
 	ctx := context.Background()

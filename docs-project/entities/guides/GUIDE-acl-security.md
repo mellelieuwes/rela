@@ -468,13 +468,13 @@ Load-bearing details:
   The stub is not inert in the meantime: the principal's **asserted roles
   still apply** (see `asserted_role_assignments`), so it is not powerless
   while it waits for group assignment.
-- **On a filesystem/memory backend, provisioning is best-effort unique.**
-  `principal_property` uniqueness is enforced check-then-write on fs/mem,
-  not atomically, so two processes (or the IdP webhook racing a lazy
-  provision) can in principle create two stubs for one subject. In one
-  process the write mutex serializes them and the loser re-resolves the
-  existing stub. A PostgreSQL backend closes the cross-process gap with a
-  real unique constraint. If two stubs ever do collide, resolution for that
+- **On a filesystem/memory backend, provisioning is unique within one
+  process.** `principal_property` uniqueness is enforced by the store's
+  transaction on fs/mem, which is a lock inside one process. Two processes
+  (or the IdP webhook in another process racing a lazy provision) can in
+  principle create two stubs for one subject. Within a process the loser
+  sees the unique violation and re-resolves the existing stub. A PostgreSQL
+  backend closes the cross-process gap with a real unique constraint. If two stubs ever do collide, resolution for that
   subject becomes ambiguous until an operator merges them.
 - **The 403 discloses only that the identity is unmatched.** Like every
   ACL denial on the data-entry write path, the body carries a

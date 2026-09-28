@@ -24,7 +24,10 @@ import (
 // write paths reach Manager directly and can submit garbage. We guarantee
 // the on-disk relation always has a finite numeric value when the type
 // declares the side orderable, regardless of write entry point.
-func (m *Manager) assignManagedOrder(ctx context.Context, rel *entity.Relation, relType string) error {
+//
+// st is the store the siblings are read from: the Tx view when the caller
+// runs the read and the create in one transaction.
+func (m *Manager) assignManagedOrder(ctx context.Context, st store.Store, rel *entity.Relation, relType string) error {
 	relDef, ok := m.deps.Meta.Relations[relType]
 	// Caller already validated the relation type via Meta.ValidateRelation. This
 	// branch is only reachable through a metamodel reload race; failing loudly
@@ -45,7 +48,7 @@ func (m *Manager) assignManagedOrder(ctx context.Context, rel *entity.Relation, 
 		if _, ok := FiniteOrder(rel.Properties[prop]); ok {
 			return nil
 		}
-		vals, err := m.collectSiblingOrders(ctx, query, prop)
+		vals, err := collectSiblingOrders(ctx, st, query, prop)
 		if err != nil {
 			return fmt.Errorf("collect siblings for %q: %w", prop, err)
 		}
@@ -64,9 +67,9 @@ func (m *Manager) assignManagedOrder(ctx context.Context, rel *entity.Relation, 
 
 // collectSiblingOrders walks relations matching q and returns the finite
 // float values present at prop.
-func (m *Manager) collectSiblingOrders(ctx context.Context, q store.RelationQuery, prop string) ([]float64, error) {
+func collectSiblingOrders(ctx context.Context, st store.Store, q store.RelationQuery, prop string) ([]float64, error) {
 	var vals []float64
-	for r, err := range m.deps.Store.ListRelations(ctx, q) {
+	for r, err := range st.ListRelations(ctx, q) {
 		if err != nil {
 			return nil, err
 		}
@@ -117,18 +120,23 @@ func validateOrderUpdate(opts entity.RelationOptions, relDef metamodel.RelationD
 // maybeRenumberSide walks the siblings matching q, checks whether the
 // finite values at prop have a gap below OrderCollapseThreshold, and if
 // so rewrites them to dense integer ordinals 1.0..N. Two-phase: build
-// the full plan, then apply it. A mid-loop write failure aborts the
-// apply and returns the error — earlier writes still landed (the store
-// has no transaction).
+// the full plan, then apply it. It returns the relations it rewrote so the
+// caller can audit them once the writes are durable.
+//
+// st is the store to read and write: Manager.runRenumberAfterUpdate passes
+// the Tx view, so the scan and the rewrites are one transaction and two
+// concurrent renumbers of one side cannot interleave.
 //
 // Renumber preserves missing-ness: siblings whose value at prop is
 // missing (or non-finite) stay missing. Only siblings that previously
 // had a finite value are redistributed.
-func (m *Manager) maybeRenumberSide(ctx context.Context, q store.RelationQuery, prop string) error {
+func maybeRenumberSide(
+	ctx context.Context, st store.Store, q store.RelationQuery, prop string,
+) ([]*entity.Relation, error) {
 	var sibs []*entity.Relation
-	for r, err := range m.deps.Store.ListRelations(ctx, q) {
+	for r, err := range st.ListRelations(ctx, q) {
 		if err != nil {
-			return err
+			return nil, err
 		}
 		c := *r
 		if r.Properties != nil {
@@ -138,7 +146,7 @@ func (m *Manager) maybeRenumberSide(ctx context.Context, q store.RelationQuery, 
 		sibs = append(sibs, &c)
 	}
 	if len(sibs) < 2 {
-		return nil
+		return nil, nil
 	}
 
 	values := make([]float64, 0, len(sibs))
@@ -149,7 +157,7 @@ func (m *Manager) maybeRenumberSide(ctx context.Context, q store.RelationQuery, 
 	}
 	sort.Float64s(values)
 	if !NeedsRenumber(values) {
-		return nil
+		return nil, nil
 	}
 
 	type planEntry struct {
@@ -185,42 +193,61 @@ func (m *Manager) maybeRenumberSide(ctx context.Context, q store.RelationQuery, 
 	// Renumber writes go directly to the store rather than through
 	// Manager.UpdateRelation: that method calls runRenumberAfterUpdate, so
 	// routing renumber through it would recurse (renumber → update → renumber).
-	// To keep these cascaded writes traceable anyway, emit one audit record per
-	// write here — the same approach cascadeHost uses for cascade deletes
-	// (cascadehost.go). The triggered-by marker distinguishes renumber writes
-	// from the user-initiated UpdateRelation that spawned them. See issue #886.
-	renumberCtx := audit.WithTriggeredBy(ctx, "renumber:"+prop)
+	updated := make([]*entity.Relation, 0, len(plan))
 	for _, p := range plan {
 		props := make(map[string]any, len(p.rel.Properties)+1)
 		maps.Copy(props, p.rel.Properties)
 		props[prop] = p.newVal
 		data := store.RelationData{Properties: props, Content: p.rel.Content}
-		updated, err := m.deps.Store.UpdateRelation(ctx, p.rel.From, p.rel.Type, p.rel.To, data)
+		u, err := st.UpdateRelation(ctx, p.rel.From, p.rel.Type, p.rel.To, data)
 		if err != nil {
-			return fmt.Errorf("renumber write failed for %s--%s--%s: %w", p.rel.From, p.rel.Type, p.rel.To, err)
+			return nil, fmt.Errorf("renumber write failed for %s--%s--%s: %w", p.rel.From, p.rel.Type, p.rel.To, err)
 		}
-		m.recordRelationAudit(renumberCtx, audit.OpUpdateRelation, updated, "renumbered "+prop)
+		updated = append(updated, u)
 	}
-	return nil
+	return updated, nil
 }
 
 // runRenumberAfterUpdate logs (does not return) renumber failures from
 // the post-update cleanup pass. Called from UpdateRelation when the
 // caller touched a managed order property.
+//
+// Each side runs in its own [store.Transactor.Tx], separate from the
+// caller's update: a renumber failure must not roll back a write that
+// already succeeded. The rewrites are audited after commit, one record per
+// write, the same approach cascadeHost uses for cascade deletes. The
+// triggered-by marker distinguishes them from the user-initiated
+// UpdateRelation that spawned them (issue #886).
 func (m *Manager) runRenumberAfterUpdate(ctx context.Context, from, to, relType string, touchedOut, touchedIn bool) {
 	relDef, ok := m.deps.Meta.Relations[relType]
 	if !ok {
 		return
 	}
+	renumber := func(q store.RelationQuery, prop string) error {
+		var updated []*entity.Relation
+		err := m.deps.Store.Tx(ctx, func(view store.Store) error {
+			var rErr error
+			updated, rErr = maybeRenumberSide(ctx, view, q, prop)
+			return rErr
+		})
+		if err != nil {
+			return err
+		}
+		renumberCtx := audit.WithTriggeredBy(ctx, "renumber:"+prop)
+		for _, u := range updated {
+			m.recordRelationAudit(renumberCtx, audit.OpUpdateRelation, u, "renumbered "+prop)
+		}
+		return nil
+	}
 	if touchedOut {
 		q := store.RelationQuery{From: from, Type: relType}
-		if rErr := m.maybeRenumberSide(ctx, q, relDef.OutgoingOrderProperty()); rErr != nil {
+		if rErr := renumber(q, relDef.OutgoingOrderProperty()); rErr != nil {
 			slog.Error("renumber outgoing side failed", "from", from, "relType", relType, "err", rErr)
 		}
 	}
 	if touchedIn {
 		q := store.RelationQuery{To: to, Type: relType}
-		if rErr := m.maybeRenumberSide(ctx, q, relDef.IncomingOrderProperty()); rErr != nil {
+		if rErr := renumber(q, relDef.IncomingOrderProperty()); rErr != nil {
 			slog.Error("renumber incoming side failed", "to", to, "relType", relType, "err", rErr)
 		}
 	}

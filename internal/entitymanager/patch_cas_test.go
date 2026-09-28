@@ -88,9 +88,10 @@ func TestPatchEntity_StaleExpectedVersionSurvivesAsTypedConflict(t *testing.T) {
 		"the rejected patch must have written nothing")
 }
 
-// TestPatchEntity_EmptyExpectedVersionIsUnconditional pins that existing
-// callers — every one of which passes no version — keep their old behavior.
-func TestPatchEntity_EmptyExpectedVersionIsUnconditional(t *testing.T) {
+// TestPatchEntity_EmptyExpectedVersionNeverFailsOnConflict pins that a patch
+// with no ExpectedVersion is never rejected for a write the caller did not
+// see: the manager retries against the newer row, and the patch lands.
+func TestPatchEntity_EmptyExpectedVersionNeverFailsOnConflict(t *testing.T) {
 	st := memstore.New()
 	mgr := newManagerOverStore(t, st)
 	stored, _ := seedCASEntity(t, st)
@@ -102,7 +103,7 @@ func TestPatchEntity_EmptyExpectedVersionIsUnconditional(t *testing.T) {
 	_, err := mgr.PatchEntity(context.Background(), stored.ID, entity.Patch{
 		Properties: map[string]any{"title": "Unconditional"},
 	})
-	require.NoError(t, err, "a patch with no ExpectedVersion must not become conditional")
+	require.NoError(t, err, "a patch with no ExpectedVersion must not fail on a conflict")
 
 	got, err := st.GetEntity(context.Background(), stored.ID)
 	require.NoError(t, err)
@@ -110,9 +111,9 @@ func TestPatchEntity_EmptyExpectedVersionIsUnconditional(t *testing.T) {
 }
 
 // TestPatchEntity_ConflictRetryLoopConverges exercises the loop a real
-// caller writes — the shape the webhook append path will adopt once it drops
-// its writeMu. If the conflict error were unmatchable this test would hang at
-// the errors.As check and fail, which is the point.
+// caller writes — the shape the webhook append path uses. If the conflict
+// error were unmatchable this test would hang at the errors.As check and
+// fail, which is the point.
 func TestPatchEntity_ConflictRetryLoopConverges(t *testing.T) {
 	st := memstore.New()
 	mgr := newManagerOverStore(t, st)

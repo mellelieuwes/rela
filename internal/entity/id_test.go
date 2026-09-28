@@ -594,3 +594,23 @@ func TestValidateID_RejectsReservedPrincipalSeparator(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateSequentialID(t *testing.T) {
+	ids := []string{"TKT-001", "TKT-004"}
+	tests := []struct {
+		name string
+		skip int
+		want string
+	}{
+		{"skip zero is next", 0, "TKT-005"},
+		{"skip spreads past next", 3, "TKT-008"},
+		{"negative skip counts as zero", -2, "TKT-005"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := GenerateSequentialID(ids, "TKT-", tc.skip); got != tc.want {
+				t.Errorf("GenerateSequentialID(skip=%d) = %s, want %s", tc.skip, got, tc.want)
+			}
+		})
+	}
+}

@@ -629,3 +629,28 @@ func TestAttachmentUpload_ZipExecutableContainersRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestAttachmentUpload_FullUploadBudgetIs503 pins that an upload arriving
+// while every upload slot is taken is refused with 503 before its body is
+// read, and nothing is written.
+func TestAttachmentUpload_FullUploadBudgetIs503(t *testing.T) {
+	app := newTestAppV1(t)
+	seedEntity(app, &entity.Entity{ID: "TKT-001", Type: "ticket", Properties: map[string]any{"title": "T1"}})
+	d := writeACL(t, app)
+	app.acl = d
+	for range attachment.DefaultMaxUploads {
+		release, ok := app.attachments.uploads.TryAcquire()
+		if !ok {
+			t.Fatal("could not fill the upload budget")
+		}
+		t.Cleanup(release)
+	}
+
+	rec := putAttachmentAs(aliceCtx(), t, app, d, "TKT-001", "screenshot", "shot.txt", []byte("DATA"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("upload with a full budget: got %d, want 503; body=%s", rec.Code, rec.Body)
+	}
+	if got := mustGet(t, app, "TKT-001").GetString("screenshot"); got != "" {
+		t.Errorf("property = %q after a refused upload, want empty", got)
+	}
+}

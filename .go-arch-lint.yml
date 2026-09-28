@@ -382,6 +382,9 @@ deps:
       - entitymanager
       - filter
       - importer
+      # lock.For picks the attachment service's keyed lock from the store
+      # (TKT-WE0S2K), at the CLI and MCP wiring sites.
+      - lock
       - lua
       - markdown
       - mcp
@@ -471,6 +474,10 @@ deps:
       - principal
       - git
       - htmlutil
+      # lock.For picks the attachment service's keyed lock from the store
+      # (TKT-WE0S2K). Only the wiring in app.go uses it; handlers hold the
+      # consumer-side attachment.Locker.
+      - lock
       - lua
       # Declarative-webhook `append_section` splices a named section into an
       # entity body (TKT-1EM4KL). markdown is a near-leaf (it depends only on

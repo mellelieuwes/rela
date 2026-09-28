@@ -17,7 +17,7 @@ import (
 // This is a consumer-side interface (CLAUDE.md: declared where it is used, the
 // `attachment` package, not next to an implementation). The wiring site
 // supplies a concrete processor; when [Deps.Processor] is nil the service uses
-// [NoopProcessor], so the no-processor path stays zero-copy.
+// [NoopProcessor], so the no-processor path never buffers in memory.
 //
 // Process receives the upload context and a reader over the bytes. It returns
 // either a (possibly-rewritten) reader plus the resulting [ProcessInfo], or a
@@ -81,7 +81,7 @@ func Rejectedf(format string, args ...any) error {
 
 // NoopProcessor is the default [Processor]: it validates nothing, transforms
 // nothing, and passes the reader through untouched. Because it does not need
-// the full file, the seam keeps the zero-copy stream for it.
+// the full file, the seam streams it without buffering in memory.
 type NoopProcessor struct{}
 
 // NeedsFullFile reports false — the no-op never buffers.
@@ -96,7 +96,9 @@ func (NoopProcessor) Process(_ context.Context, _ ProcessContext, r io.Reader) (
 // buffering the stream first when the processor needs the whole file. It
 // returns the reader to persist, the (possibly-updated) file name, and any
 // error. When the processor is the no-op (or needs no buffering) the original
-// reader is threaded straight through — preserving the zero-copy path.
+// reader is threaded straight through, unbuffered. (The service still spools
+// it to a temporary file before taking the property lock; see
+// spoolAttachment.)
 //
 // maxBytes bounds the buffer so a processor that needs the full file cannot be
 // used to exhaust memory; it should be the same cap the ingress layer enforces.

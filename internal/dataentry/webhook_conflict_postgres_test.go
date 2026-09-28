@@ -397,16 +397,10 @@ func TestWebhookConflict_BlindUpdateLosesAppends(t *testing.T) {
 // postgres store, must not lose an append. Six concurrent deliveries, six
 // notifications present at the end.
 //
-// What this DOES prove: the assembled pipeline (writeMu + per-attempt re-find +
-// PatchEntity) is safe against concurrent deliveries reaching one process.
-//
-// What it does NOT prove, stated plainly so the next reader is not misled:
-// it does not isolate the re-read in applyWebhookSteps. writeMu serializes the
-// deliveries and each attempt re-runs findWebhookTarget, so this test still
-// passes with that re-read removed — its value on the find path is redundancy,
-// not necessity (see the note on applyWebhookSteps). Nor does it cover
-// MULTI-PROCESS appenders, which is the case no part of this pipeline currently
-// closes; the honest scope is one process, many concurrent requests.
+// There is no process-wide write lock (TKT-WE0S2K), so the deliveries really
+// do run concurrently: what keeps every append is the compare-and-swap in
+// applyWebhookSteps and its retry. The cross-process variant below pins the
+// same guarantee across two stores.
 func TestWebhookConflict_PipelineAppendsAllLand(t *testing.T) {
 	_, dsn := conflictTestSchema(t)
 	ctx := context.Background()
@@ -464,21 +458,15 @@ func TestWebhookConflict_PipelineAppendsAllLand(t *testing.T) {
 	}
 }
 
-// TestWebhookConflict_CrossProcessAppendsCanBeLost documents the ONE case this
-// design does not close, so the limitation is recorded in code rather than only
-// in prose.
+// TestWebhookConflict_CrossProcessAppendsAllLand pins that concurrent appends
+// from two rela-server processes against one database all land.
 //
-// Two Apps on SEPARATE pgstores over the SAME schema model two rela-server
-// processes against one database (the multi-writer deployment documented in
-// docs/postgres-backend.md). writeMu is per-process, so it does not serialize
-// them, and nothing in the append path is a compare-and-swap — so a concurrent
-// append CAN be lost across processes.
-//
-// The test asserts the weaker property that actually holds (both deliveries
-// succeed and at least one notification lands) and reports when a loss occurs,
-// rather than asserting a guarantee the implementation does not provide. A
-// server-side append mode on entity.Patch is the fix; it is a named follow-up.
-func TestWebhookConflict_CrossProcessAppendsCanBeLost(t *testing.T) {
+// Two Apps on SEPARATE pgstores over the SAME schema model the multi-writer
+// deployment documented in docs/postgres-backend.md. They share no memory, so
+// only the database can serialize them: each append is a compare-and-swap on
+// the row version (applyWebhookSteps), and a lost one retries against the
+// fresh body.
+func TestWebhookConflict_CrossProcessAppendsAllLand(t *testing.T) {
 	_, dsn := conflictTestSchema(t)
 	ctx := context.Background()
 
@@ -502,8 +490,10 @@ func TestWebhookConflict_CrossProcessAppendsCanBeLost(t *testing.T) {
 	seed.Content = "## Notifications"
 	require.NoError(t, stA.CreateEntity(ctx, seed))
 
-	routerA := newPostgresHookApp(t, stA, hooks).NewRouter()
-	routerB := newPostgresHookApp(t, stB, hooks).NewRouter()
+	routers := []http.Handler{
+		newPostgresHookApp(t, stA, hooks).NewRouter(),
+		newPostgresHookApp(t, stB, hooks).NewRouter(),
+	}
 
 	deliver := func(router http.Handler, n int) int {
 		body := fmt.Sprintf(`{"title":"web01/http","n":%d}`, n)
@@ -515,16 +505,15 @@ func TestWebhookConflict_CrossProcessAppendsCanBeLost(t *testing.T) {
 		return rec.Code
 	}
 
+	const deliveries = 8
 	var wg sync.WaitGroup
-	codes := make([]int, 2)
+	codes := make([]int, deliveries)
 	start := make(chan struct{})
-	for i, router := range []http.Handler{routerA, routerB} {
-		wg.Add(1)
-		go func(n int, rt http.Handler) {
-			defer wg.Done()
+	for i := range deliveries {
+		wg.Go(func() {
 			<-start
-			codes[n] = deliver(rt, n)
-		}(i, router)
+			codes[i] = deliver(routers[i%2], i)
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -535,19 +524,9 @@ func TestWebhookConflict_CrossProcessAppendsCanBeLost(t *testing.T) {
 
 	final, err := stA.GetEntity(ctx, "INC-XPROC")
 	require.NoError(t, err)
-
-	landed := 0
-	for i := range 2 {
-		if strings.Contains(final.Content, fmt.Sprintf("- alert %d", i)) {
-			landed++
-		}
-	}
-	require.Positive(t, landed, "at least one cross-process append must land")
-	if landed < 2 {
-		t.Logf("KNOWN LIMITATION: %d of 2 cross-process appends landed; "+
-			"the append path is not a compare-and-swap across processes "+
-			"(server-side append mode on entity.Patch is the fix). content = %q",
-			landed, final.Content)
+	for i := range deliveries {
+		require.Contains(t, final.Content, fmt.Sprintf("- alert %d", i),
+			"cross-process delivery %d was lost; content = %q", i, final.Content)
 	}
 }
 
@@ -582,6 +561,13 @@ func TestWebhookConflict_SchemaPinnedDSNIsIsolated(t *testing.T) {
 	).Scan(&inA))
 	require.Equal(t, 1, inA, "the row must be in the pinned schema (unqualified name resolves there)")
 
+	// A fresh database has no public.entities at all, which also means the row
+	// did not leak there.
+	var publicTable *string
+	require.NoError(t, poolA.QueryRow(ctx, `SELECT to_regclass('public.entities')::text`).Scan(&publicTable))
+	if publicTable == nil {
+		return
+	}
 	var inPublic int
 	require.NoError(t, poolA.QueryRow(ctx,
 		`SELECT count(*) FROM public.entities WHERE id = $1`, "INC-ISOLATED",

@@ -17,6 +17,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/audit"
 	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
+	"github.com/Sourcehaven-BV/rela/internal/lock"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/project"
 	"github.com/Sourcehaven-BV/rela/internal/statemachine"
@@ -107,6 +108,8 @@ func setupAttachmentService(t *testing.T) attachmentFixture {
 		Store:         st,
 		Meta:          meta,
 		EntityManager: mgr,
+		Locker:        lock.NewMemoryLocker(),
+		Authorizer:    attachment.AllowAllWrites{},
 	})
 	if err != nil {
 		t.Fatalf("attachment.New: %v", err)
@@ -218,6 +221,13 @@ func TestService_New_RejectsNilDeps(t *testing.T) {
 		{"nil store", attachment.Deps{Store: nil}, "Store is required"},
 		{"nil meta", attachment.Deps{Store: storeStub{}}, "Meta is required"},
 		{"nil em", attachment.Deps{Store: storeStub{}, Meta: &metamodel.Metamodel{}}, "EntityManager is required"},
+		{"nil locker", attachment.Deps{
+			Store: storeStub{}, Meta: &metamodel.Metamodel{}, EntityManager: &countingPatcher{},
+		}, "Locker is required"},
+		{"nil authorizer", attachment.Deps{
+			Store: storeStub{}, Meta: &metamodel.Metamodel{}, EntityManager: &countingPatcher{},
+			Locker: lock.NewMemoryLocker(),
+		}, "Authorizer is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -414,7 +424,10 @@ func TestService_DeleteAbsentFileDoesNotWrite(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 	counter := &countingPatcher{EntityPatcher: f.mgr}
-	svc, err := attachment.New(attachment.Deps{Store: f.st, Meta: f.meta, EntityManager: counter})
+	svc, err := attachment.New(attachment.Deps{
+		Store: f.st, Meta: f.meta, EntityManager: counter, Locker: lock.NewMemoryLocker(),
+		Authorizer: attachment.AllowAllWrites{},
+	})
 	if err != nil {
 		t.Fatalf("attachment.New: %v", err)
 	}

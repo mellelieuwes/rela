@@ -236,12 +236,18 @@ func ExtractHighestNumber(ids []string, prefix string) int {
 
 // GenerateNextID generates the next available ID for a given prefix
 func GenerateNextID(existingIDs []string, prefix string) string {
+	return GenerateSequentialID(existingIDs, prefix, 0)
+}
+
+// GenerateSequentialID is [GenerateNextID] skipping skip numbers past the
+// highest existing one: skip 0 yields highest+1. A negative skip counts as 0.
+func GenerateSequentialID(existingIDs []string, prefix string, skip int) string {
 	highest := ExtractHighestNumber(existingIDs, prefix)
 	// Ensure prefix ends with dash
 	if !strings.HasSuffix(prefix, "-") {
 		prefix += "-"
 	}
-	return fmt.Sprintf("%s%03d", strings.ToUpper(prefix), highest+1)
+	return fmt.Sprintf("%s%03d", strings.ToUpper(prefix), highest+1+max(skip, 0))
 }
 
 // Short ID generation constants

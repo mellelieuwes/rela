@@ -9,9 +9,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	v1 "github.com/Sourcehaven-BV/rela/internal/apiwire/v1"
 	"github.com/Sourcehaven-BV/rela/internal/dataentryconfig"
+	"github.com/Sourcehaven-BV/rela/internal/entity"
 )
 
 // callAction is a thin wrapper that invokes handleV1Action directly. It
@@ -285,9 +287,8 @@ func TestHandleV1Action_OpenRedirectRejected(t *testing.T) {
 }
 
 func TestHandleV1Action_Concurrent(t *testing.T) {
-	// Two parallel POSTs to the same action should serialize via the write lock
-	// (no panics, no corruption). We use a script that increments a property
-	// on a known entity to detect lost updates.
+	// Parallel POSTs to the same action run concurrently and all succeed
+	// (no panics, no races under -race).
 	app := newActionTestApp(t, map[string]string{
 		"noop.lua": `return {message = "done"}`,
 	})
@@ -318,5 +319,57 @@ func TestNewCorrelationID(t *testing.T) {
 	}
 	if id1 == "" {
 		t.Error("correlation ID is empty")
+	}
+}
+
+// TestHandleV1Action_DoesNotBlockConcurrentWrites pins acceptance criterion 1
+// of TKT-WE0S2K: a running action holds no lock that other writes wait on.
+// The action spins until a concurrent PATCH has landed. Under the removed
+// process-wide write lock the PATCH would wait for the action and the action
+// for the PATCH, so the test would time out instead.
+func TestHandleV1Action_DoesNotBlockConcurrentWrites(t *testing.T) {
+	app := newActionTestApp(t, map[string]string{
+		"wait.lua": `
+while true do
+  local e = rela.get_entity("TKT-001")
+  if e ~= nil and e.properties.status == "go" then break end
+end
+return {message = "released"}`,
+	})
+	app.Cfg().Actions = map[string]dataentryconfig.Action{
+		"wait": {Script: "wait.lua"},
+	}
+	seedEntity(app, &entity.Entity{
+		ID: "TKT-001", Type: "ticket",
+		Properties: map[string]any{"title": "Blocked", "status": "open"},
+	})
+
+	actionDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/_action/wait", http.NoBody)
+		rec := httptest.NewRecorder()
+		callAction(app, req, rec)
+		actionDone <- rec
+	}()
+
+	patchDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { patchDone <- patchBody(app, `{"properties":{"status":"go"}}`, nil) }()
+
+	const limit = 10 * time.Second
+	select {
+	case rec := <-patchDone:
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PATCH got %d, want 200: %s", rec.Code, rec.Body)
+		}
+	case <-time.After(limit):
+		t.Fatal("PATCH did not complete while the action was running; a write lock is back")
+	}
+	select {
+	case rec := <-actionDone:
+		if rec.Code != http.StatusOK {
+			t.Fatalf("action got %d, want 200: %s", rec.Code, rec.Body)
+		}
+	case <-time.After(limit):
+		t.Fatal("action did not observe the concurrent PATCH")
 	}
 }

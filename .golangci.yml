@@ -319,8 +319,8 @@ linters:
       # contextcheck in internal/dataentry write handlers: false positives from
       # the provision re-stamp seam (TKT-ANUJDS).
       #
-      # The write handlers acquire writeMu and re-stamp the request context via
-      # enterWrite: `r = h.enterWrite(r)`, where the new context is derived from
+      # The write handlers re-stamp the request context via withProvision:
+      # `r = h.withProvision(r)`, where the new context is derived from
       # r.Context() (principal.With + acl.WithRequest + withReadGate — all
       # context.WithValue). The context MUST ride on r, not just thread to the
       # manager, because the downstream read gate is consulted through helpers
@@ -332,14 +332,14 @@ linters:
       # "non-inherited" — it cannot trace the derivation through the *http.Request
       # swap — and propagates that up to the dispatchers that call these handlers
       # (api_v1.go, sync.go). The seam is pinned structurally by
-      # TestProvisionSeam_EveryWriteHandlerUsesEnterWrite and end-to-end by the
+      # TestProvisionSeam_EveryWriteHandlerUsesWithProvision and end-to-end by the
       # provision e2e tests, so the guarantee is tested, not asserted. Path
       # exclusion rather than ~15 //nolint comments so the reasoning lives in one
       # place. If those tests fail, fix the seam — do not widen this exclusion.
       #
       # Two scopes: the write-handler files (where the reassignment happens) are
       # path-excluded; the dispatchers/tests that call them are message-scoped to
-      # the specific enterWrite handlers so the rest of those files stays checked.
+      # the specific withProvision handlers so the rest of those files stays checked.
       - linters:
           - contextcheck
         path: internal/dataentry/(write_handler|actions|sync_handler|sync_handlers|attachment_handler|handlers_attachment)\.go

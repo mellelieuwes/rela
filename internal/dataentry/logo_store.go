@@ -18,7 +18,7 @@ import (
 // (Get/URL) never block each other and writes (Save/Delete) publish the new
 // bytes atomically. This is deliberately NOT part of the App-wide AppState
 // snapshot — the logo has exactly one reader path and one writer path, so it
-// owns its own state rather than riding the shared snapshot + writeMu (the
+// owns its own state rather than riding the shared snapshot (the
 // pattern the AppState-decomposition arc pushes every peripheral service
 // toward).
 //

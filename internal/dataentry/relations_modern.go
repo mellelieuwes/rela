@@ -343,18 +343,15 @@ func (h *writeHandler) applyRelationsModern(
 			from, to := edgeEndpoints(entityID, ref.ID, incoming)
 
 			existing, exists := current[ref.ID]
-			if exists {
-				if isEdgeNoOp(existing, finalProps, finalContent, contentSet, ref) {
-					continue // value-based no-op suppression
-				}
-				if err := h.writeUpdateRelation(ctx, from, tailOf(existing), to, canonical, ref); err != nil {
-					return warnings, err
-				}
-			} else {
-				if err := h.writeCreateRelation(ctx, from, newTail, to, canonical, ref,
-					finalProps, finalContent); err != nil {
-					return warnings, err
-				}
+			if exists && isEdgeNoOp(existing, finalProps, finalContent, contentSet, ref) {
+				continue // value-based no-op suppression
+			}
+			if err := h.upsertEdge(ctx, edgeWrite{
+				from: from, to: to, relType: canonical, ref: ref,
+				exists: exists, existingTail: tailOf(existing), newTail: newTail,
+				props: finalProps, content: finalContent,
+			}); err != nil {
+				return warnings, err
 			}
 		}
 
@@ -364,7 +361,11 @@ func (h *writeHandler) applyRelationsModern(
 				continue
 			}
 			from, to := edgeEndpoints(entityID, peerID, incoming)
-			if err := em.DeleteRelationState(ctx, from, tailOf(current[peerID]), canonical, to); err != nil {
+			err := em.DeleteRelationState(ctx, from, tailOf(current[peerID]), canonical, to)
+			if errors.Is(err, store.ErrNotFound) {
+				continue // a concurrent request deleted it first
+			}
+			if err != nil {
 				return warnings, &relationError{
 					RelType: canonical, Target: peerID, Op: "delete",
 					Reason: "delete_failed", Err: err,
@@ -374,6 +375,46 @@ func (h *writeHandler) applyRelationsModern(
 	}
 	return warnings, nil
 }
+
+// edgeWrite is one desired edge for upsertEdge.
+type edgeWrite struct {
+	from, to, relType     string
+	ref                   v1.ResourceIdentifier
+	exists                bool // the edge existed when the reconciler read it
+	existingTail, newTail entity.Face
+	props                 map[string]any
+	content               string
+}
+
+// upsertEdge writes one desired edge: an update when it existed at read time,
+// a create otherwise. That read is not held still, so a concurrent request may
+// create or delete the same edge in between. A write that finds the edge in
+// the other state switches to the other write, up to upsertEdgeAttempts
+// times. A caller still losing after that gets the last error, which
+// writeRelationsApplyError answers as a 409.
+func (h *writeHandler) upsertEdge(ctx context.Context, w edgeWrite) error {
+	exists, tail := w.exists, w.existingTail
+	var err error
+	for range upsertEdgeAttempts {
+		if exists {
+			err = h.writeUpdateRelation(ctx, w.from, tail, w.to, w.relType, w.ref)
+			if !errors.Is(err, entitymanager.ErrRelationNotFound) {
+				return err
+			}
+		} else {
+			err = h.writeCreateRelation(ctx, w.from, w.newTail, w.to, w.relType, w.ref, w.props, w.content)
+			if !errors.Is(err, entitymanager.ErrRelationAlreadyExists) {
+				return err
+			}
+		}
+		exists, tail = !exists, w.newTail
+	}
+	return err
+}
+
+// upsertEdgeAttempts bounds how often upsertEdge switches between update and
+// create while concurrent requests keep flipping the edge.
+const upsertEdgeAttempts = 8
 
 // writeCreateRelation creates a new relation via the EntityManager
 // (preserving the ACL, audit, validation and automation paths).
@@ -469,39 +510,27 @@ func (h *writeHandler) writeUpdateRelation(
 	// so swallowing a store error here would ERASE the edge's existing
 	// properties instead of merging into them — a silent partial write on a
 	// transient fault.
-	current, readErr := h.currentEdgeOnFace(ctx, from, tail, relType, to)
-	if readErr != nil && !errors.Is(readErr, store.ErrNotFound) {
-		return &relationError{
-			RelType: relType, Target: ref.ID, Op: "update",
-			Reason: "update_failed", Err: readErr,
+	//
+	// The read, merge and write share one Tx, like the manager's
+	// UpdateRelation, so a concurrent update cannot land in between and be
+	// overwritten by the merge of the row read before it.
+	txErr := h.store.Tx(ctx, func(view store.Store) error {
+		current, readErr := edgeOnFace(ctx, view, from, tail, relType, to)
+		if readErr != nil && !errors.Is(readErr, store.ErrNotFound) {
+			return readErr
 		}
-	}
-	finalProps, finalContent, _ := mergeEdgeMeta(current, ref)
-	data := store.RelationData{Properties: finalProps, Content: finalContent}
-	if _, sErr := h.store.UpdateRelationState(ctx, from, tail, relType, to, data); sErr != nil {
+		finalProps, finalContent, _ := mergeEdgeMeta(current, ref)
+		data := store.RelationData{Properties: finalProps, Content: finalContent}
+		_, sErr := view.UpdateRelationState(ctx, from, tail, relType, to, data)
+		return sErr
+	})
+	if txErr != nil {
 		return &relationError{
 			RelType: relType, Target: ref.ID, Op: "update",
-			Reason: "update_failed", Err: sErr,
+			Reason: "update_failed", Err: txErr,
 		}
 	}
 	return nil
-}
-
-// currentEdgeOnFace reads the edge of this triple whose TAIL is exactly
-// tail, for the soft-condition fallback's read-merge-write.
-//
-// `store.GetRelation` reads the default tail only, so on a faced source it
-// would merge the caller's changes into a DIFFERENT edge's properties and
-// write that result back (BUG-64MU2Q).
-//
-// An absent edge is [store.ErrNotFound], NOT a nil relation with a nil
-// error: the caller merges against the returned value, and "no prior state"
-// has to be distinguishable from "the read failed" — conflating them is how
-// a transient fault becomes a silent property erasure.
-func (h *writeHandler) currentEdgeOnFace(
-	ctx context.Context, from string, tail entity.Face, relType, to string,
-) (*entity.Relation, error) {
-	return edgeOnFace(ctx, h.store, from, tail, relType, to)
 }
 
 // tailOfExistingEdge reports the TAIL the single-relation PATCH and DELETE

@@ -21,6 +21,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
 	"github.com/Sourcehaven-BV/rela/internal/git"
+	"github.com/Sourcehaven-BV/rela/internal/lock"
 	"github.com/Sourcehaven-BV/rela/internal/lua"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/migration"
@@ -95,11 +96,9 @@ type appEntityWriter interface {
 // and publish it atomically via a.schema.Reload. The previous snapshot is
 // garbage-collected once no reader holds it.
 //
-// Mutations (CreateEntity, UpdateEntity, DeleteEntity, CreateRelation,
-// UpdateRelation, DeleteRelation, SetProperty, action scripts) serialize
-// via writeMu. writeMu excludes concurrent mutations but does NOT block
-// readers — readers go through a.State(). The workspace's internal
-// reloadMu coordinates the reload itself with the mutation path.
+// Mutations run concurrently; there is no App-level write lock
+// (TKT-WE0S2K). Readers go through a.State(). reloadMu serializes the
+// reload itself.
 //
 // TODO(TKT-R68TV8): App is a god-object. Decompose toward the
 // 40-method load line — extract the API/serialization/relation services into
@@ -113,7 +112,7 @@ type appEntityWriter interface {
 // reconciler (18 methods) — moved to writeHandler (131 → 114); the Lua
 // action handler joined it (115 → 114, from a base that had absorbed the
 // DEC-O59WM4 script-read helpers), completing the write surface: every
-// writeMu write path now lives on or routes through writeHandler. The
+// write path now lives on or routes through writeHandler. The
 // views cluster — view traversal, section building, the /_views,
 // /_sidepanel, /_sidebar handlers, and the form-resolution helpers (16
 // methods) — moved to viewsHandler, three receiver-free helpers became
@@ -327,7 +326,7 @@ type App struct {
 	serializer entitySerializer
 	// logo owns the user-uploaded sidebar logo — persistence AND the served
 	// in-memory cache — self-synchronized. Extracted from the schema snapshot so the
-	// logo no longer rides the App-wide snapshot + writeMu.
+	// logo no longer rides the App-wide snapshot.
 	logo *logoStore
 	// palette owns the user palette override and the resolved palette (derived
 	// from Cfg.Palette + the override). Self-synchronized; extracted from
@@ -339,8 +338,7 @@ type App struct {
 	settings *settingsService
 	// sync owns the /api/sync/ route cluster (fs-client ↔ pg-server
 	// replication). Extracted from App (TKT-R68TV8); holds narrow store/deleter
-	// surfaces plus a pointer to writeMu so its writes serialize with the other
-	// mutation handlers.
+	// surfaces.
 	sync *syncHandler
 	// commands owns the user-configured command surface (SSE shell-exec,
 	// file/URL launchers, command resolution). Extracted from App (TKT-R68TV8);
@@ -349,36 +347,45 @@ type App struct {
 	commands *commandHandler
 	// attachments owns the entity-attachment routes (upload/download/detach).
 	// Extracted from App (TKT-R68TV8); closures over the swappable acl/audit/
-	// field-resolver collaborators, a pointer to writeMu for the write paths.
+	// field-resolver collaborators.
 	attachments *attachmentHandler
 	// export owns the view-export routes (transform list, entity/list export).
 	// Extracted from App (TKT-JF5JI8) to keep App under its plimsoll method cap.
 	export *exportHandler
 
 	// write owns the entity/relation CRUD + clone + conflict-resolve write
-	// nucleus (TKT-R68TV8 M5.4); shares writeMu by face.
+	// nucleus (TKT-R68TV8 M5.4).
 	write *writeHandler
 	// views owns the read-only view-assembly surface: view traversal,
 	// section building, and the /_views, /_sidepanel, /_sidebar endpoints
-	// (TKT-R68TV8). No writeMu — this surface never mutates.
+	// (TKT-R68TV8). This surface never mutates.
 	views *viewsHandler
 	// appearance owns the theme/settings/palette surface: /_theme/logo,
 	// /_theme/export, /_theme/import, /_settings, /_palette (TKT-8AJ1PM).
-	// Pure glue over the self-synchronized logo/palette/settings services
-	// — no writeMu.
+	// Pure glue over the self-synchronized logo/palette/settings services.
 	appearance *appearanceHandler
 	// queries owns the search-query pipeline: executeQuery (shared by
 	// /_search, the `_position` search scope and the next-action engine),
 	// the list endpoint's `?q=` id-set helper, and the sort / property-filter
-	// passes those share (TKT-SJ0LRS). Read-only; no writeMu.
+	// passes those share (TKT-SJ0LRS). Read-only.
 	queries *queryService
 	// gantt owns the read-only gantt tree endpoint (TKT-MW28U5). Like views,
-	// it never mutates — no writeMu.
+	// it never mutates.
 	gantt     *ganttHandler
 	templater templating.Templater
 	cfgLoader config.Loader
 	kv        state.KV
 	acl       acl.ACL
+
+	// attachmentLocker serializes attachment writers to one (entity,
+	// property), for web uploads and remote MCP tools alike. Built once from
+	// the store by [lock.For], so on postgres it also excludes other
+	// processes.
+	attachmentLocker attachment.Locker
+
+	// attachmentUploads bounds concurrent uploads in this process, web and
+	// remote MCP together.
+	attachmentUploads *attachment.Limiter
 
 	// attachmentRunner drives external scan/transform commands for uploads.
 	// nil out-of-box → uploads get native MIME validation only (Phase 2 wires
@@ -405,10 +412,6 @@ type App struct {
 	// load-then-store, so two overlapping reloads could publish the older
 	// file last. Readers never take it; they go through a.State().
 	reloadMu sync.Mutex
-
-	// writeMu serializes mutation handlers (CreateEntity, UpdateEntity,
-	// etc.) against each other. Readers never take it.
-	writeMu sync.Mutex
 
 	// gitOps provides git operations when git is enabled. Set once in
 	// NewApp; never reloaded.
@@ -970,6 +973,10 @@ func NewApp(
 		scriptEngine:    scriptEngine,
 		fieldResolver:   fieldResolver,
 		auditSink:       auditSink,
+		// attachmentLocker must be set before the attachment handler copies
+		// it below.
+		attachmentLocker:  lock.For(st),
+		attachmentUploads: attachment.NewLimiter(attachment.DefaultMaxUploads),
 	}
 	// documentService needs scriptEngine (for Lua renders) and a closure
 	// that yields fresh lua.WriteDeps (so metamodel reloads propagate).
@@ -1199,8 +1206,7 @@ func NewApp(
 	// the runner wiring above so it captures the resolved runner. The acl/
 	// audit/field-resolver deps are closures because tests swap those fields
 	// on App after construction (same rationale as affordanceService); the
-	// store/manager handles are fixed for App's lifetime. writeMu is shared by
-	// face so attachment writes serialize with every other mutation handler.
+	// store/manager handles are fixed for App's lifetime.
 	app.attachments = &attachmentHandler{
 		schema: app.State,
 		store:  st,
@@ -1215,7 +1221,8 @@ func NewApp(
 		audit:      func() audit.Audit { return app.auditSink },
 		fields:     func() FieldVerdictResolver { return app.fieldResolver },
 		gateRead:   app.gateReadOrNotFound,
-		writeMu:    &app.writeMu,
+		locker:     app.attachmentLocker,
+		uploads:    app.attachmentUploads,
 		provision:  newProvisionSeam(app),
 	}
 
@@ -1223,8 +1230,7 @@ func NewApp(
 	// nucleus. Same collaborator rationale as attachmentHandler above: fixed
 	// services by value, test-swappable deps as closures over App, and the
 	// shared read/write helpers (gateRead/denyAfford/computeETag) as closures
-	// so both paths stay behaviorally identical. writeMu is shared by face
-	// so these writes serialize with every other mutation handler.
+	// so both paths stay behaviorally identical.
 	app.write = &writeHandler{
 		schema:  app.State,
 		store:   st,
@@ -1246,7 +1252,6 @@ func NewApp(
 		luaDeps:            app.luaWriteDeps,
 		fullScriptDetail:   app.allowFullScriptDetail,
 		paths:              paths,
-		writeMu:            &app.writeMu,
 		provision:          newProvisionSeam(app),
 	}
 

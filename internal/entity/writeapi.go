@@ -183,12 +183,13 @@ type Patch struct {
 	// `store.EntityVersion`: `entity` is the domain package and must not
 	// import `store`, which depends on it.
 	//
-	// Empty means "apply unconditionally", which is the historical behavior
-	// and remains the default. Note that a patch is already far safer than a
-	// read-modify-write even without this — properties it does not name are
-	// preserved, so a lost update can only affect properties two writers both
-	// named. ExpectedVersion closes the remaining case: two callers patching
-	// the SAME property, or a Content replacement computed from a base read.
+	// Empty means "apply on top of whatever is stored". The manager still
+	// writes it as a compare-and-swap against the row it merges into and
+	// retries on a conflict, so a concurrent patch to another property is
+	// never lost. ExpectedVersion adds the caller's own precondition: the
+	// patch fails if the entity changed since the caller read it, which is
+	// what a Content replacement computed from a base read, or an edit of
+	// the same property, needs.
 	ExpectedVersion string
 }
 

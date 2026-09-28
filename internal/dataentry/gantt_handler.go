@@ -21,7 +21,7 @@ import (
 
 // ganttHandler owns the read-only gantt tree endpoint. Its own struct rather
 // than App methods because App is at its plimsoll method load line; like
-// viewsHandler it never mutates, so it takes no writeMu.
+// viewsHandler it never mutates.
 //
 // The pipeline order in buildGanttForest is a SECURITY property, not a
 // performance choice (TKT-MW28U5, RR-5KEF8E/RR-7PK0YW/RR-Y7MINP):

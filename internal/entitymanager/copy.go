@@ -181,7 +181,7 @@ func (ce *copyEngine) copyState(ctx context.Context, req CopyRequest) (*CopyResu
 
 	var result CopyResult
 	if err := tx.Tx(writeCtx, func(view store.Store) error {
-		res, cerr := applyCopy(writeCtx, view, plan)
+		res, cerr := applyCopy(writeCtx, ce.m.deps.Meta, view, plan)
 		if cerr != nil {
 			return cerr
 		}
@@ -543,7 +543,9 @@ func (ce *copyEngine) buildCopyTarget(
 	if len(hard) > 0 {
 		return newValidationError(hard)
 	}
-	if err := checkUniqueProperties(ctx, ce.m.deps, target, target.ID); err != nil {
+	// Checked again inside the copy's transaction (applyCopy); this early
+	// pass fails the copy before any edge planning when it cannot succeed.
+	if err := checkUniqueProperties(ctx, ce.m.deps.Meta, ce.m.deps.Store, target, target.ID); err != nil {
 		return err
 	}
 

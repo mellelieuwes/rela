@@ -270,7 +270,7 @@ func TestCommentSuggestion_FailedWriteReopens(t *testing.T) {
 		err    error
 		status int
 	}{
-		{"version conflict", &store.VersionConflictError{}, http.StatusPreconditionFailed},
+		{"version conflict", &store.VersionConflictError{}, http.StatusConflict},
 		{"other write error", errors.New("boom"), http.StatusUnprocessableEntity},
 		{"deleted concurrently", store.ErrNotFound, http.StatusNotFound},
 	}
@@ -326,7 +326,7 @@ func raceApp(t *testing.T, rs *raceCommentStore) *App {
 // TestCommentSuggestion_LostClaimChangesNothing is the multi-process race:
 // another node accepted the suggestion after this request read it as open.
 // The conditional resolve is the only thing that can stop a second apply,
-// since writeMu is per process and a replacement containing its quote still
+// since no lock spans the request and a replacement containing its quote still
 // matches the already-edited body.
 func TestCommentSuggestion_LostClaimChangesNothing(t *testing.T) {
 	rs := &raceCommentStore{}

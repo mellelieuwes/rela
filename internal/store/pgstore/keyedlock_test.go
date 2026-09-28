@@ -2,11 +2,13 @@ package pgstore_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/lock"
 	"github.com/Sourcehaven-BV/rela/internal/lock/locktest"
 	"github.com/Sourcehaven-BV/rela/internal/store/pgstore"
@@ -21,7 +23,9 @@ func TestKeyedLock_Conformance(t *testing.T) {
 		tb.Helper()
 		// A fresh schema per subtest: advisory locks are database-global, so
 		// subtests sharing a schema would contend on the same keys.
-		pool := newScopedPool(tb.(*testing.T))
+		// Four connections give a keyed-lock capacity of two, so two distinct
+		// keys can be held at once as DistinctKeysDoNotContend requires.
+		pool := newScopedPoolSized(tb.(*testing.T), 4)
 		st, err := pgstore.New(pool)
 		require.NoError(tb, err)
 		l, err := lock.NewBackendLocker(st)
@@ -154,4 +158,38 @@ func TestKeyedLock_CancelledAcquireDoesNotWedgeOrLeak(t *testing.T) {
 	other, err := st.AcquireKeyedLock(ctx, "wedge/other")
 	require.NoError(t, err, "pool drained by destroyed connections")
 	other()
+}
+
+// TestKeyedLock_HoldersCannotStarveThePool pins the capacity cap on a real
+// pool. Each held key pins one connection, so without the cap four holders on a
+// MaxConns=2 pool would take every connection and the store write each holder
+// makes under its lock would wait forever.
+func TestKeyedLock_HoldersCannotStarveThePool(t *testing.T) {
+	_ = testDSN(t)
+	st, err := pgstore.New(newScopedPool(t))
+	require.NoError(t, err)
+
+	locker, ok := lock.For(st).(*lock.BackendLocker)
+	require.True(t, ok, "a pgstore must get the backend locker")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const holders = 4
+	errs := make(chan error, holders)
+	for i := range holders {
+		go func() {
+			id := fmt.Sprintf("E-%d", i)
+			release, acqErr := locker.Acquire(ctx, "starve/"+id)
+			if acqErr != nil {
+				errs <- acqErr
+				return
+			}
+			defer release()
+			errs <- st.CreateEntity(ctx, entity.New(id, "ticket"))
+		}()
+	}
+	for range holders {
+		require.NoError(t, <-errs, "a holder's write must not starve for a connection")
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"sort"
@@ -18,7 +19,6 @@ import (
 	entityPkg "github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
 	"github.com/Sourcehaven-BV/rela/internal/markdown"
-	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 	"github.com/Sourcehaven-BV/rela/internal/store"
 )
@@ -34,22 +34,41 @@ import (
 const DefaultWebhookMaxBodyBytes int64 = 1 << 20
 
 // webhookMaxAttempts bounds the conflict-retry loop (TKT-1EM4KL). The pipeline
-// is conflict-DETECTING rather than locking: a create loser sees
-// store.UniquePropertyError and re-finds; an append loser sees a stale-ETag
-// mismatch, re-finds and re-applies.
+// is conflict-DETECTING rather than locking: a create loser sees a unique
+// violation and re-finds; an append loser loses the compare-and-swap,
+// re-finds and re-applies.
 //
-// Four is chosen because contention here is rare and narrow — two deliveries
-// must concern the SAME entity within one request window (an HA duplicate, or a
-// flap) — so a loser that has re-read fresh state succeeds on its next attempt
-// essentially always. Each extra attempt past that buys exponentially less
-// while holding a request open, and a caller that does not retry is better
-// served by a fast, honest 409 than a slow success. Exceeding the budget is
-// reported, never silently dropped.
-const webhookMaxAttempts = 4
+// Every round has a winner, so N concurrent deliveries to one entity need at
+// most N rounds. Deliveries run concurrently within a process as well as
+// across processes (there is no write lock, TKT-WE0S2K), and
+// webhookMaxInFlight admits 8 per process, so the budget matches that. The
+// jittered pause between attempts (webhookRetryPause) keeps losers from
+// colliding again in lockstep, so a burst usually clears well within it. A
+// caller that does not retry is better served by a fast, honest 409 than a
+// slow success, and exceeding the budget is reported, never silently dropped.
+const webhookMaxAttempts = webhookMaxInFlight
+
+// webhookMaxPauseShift caps the retry pause window at 1ms<<5 = 32ms.
+const webhookMaxPauseShift = 5
+
+// webhookRetryPause waits a short random time before the next attempt; the
+// window doubles per attempt up to 32ms. It returns ctx's error if ctx ends
+// first.
+func webhookRetryPause(ctx context.Context, attempt int) error {
+	window := time.Millisecond << min(attempt, webhookMaxPauseShift)
+	//nolint:gosec // G404: jitter, not a secret
+	t := time.NewTimer(rand.N(window))
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // webhookExecTimeout bounds one delivery end to end, so a pathological hook
-// cannot pin a request goroutine (and, since the pipeline runs under writeMu,
-// the whole write path) indefinitely.
+// cannot pin a request goroutine indefinitely.
 const webhookExecTimeout = 30 * time.Second
 
 // errWebhookConflictExhausted reports that the retry budget was spent without a
@@ -83,7 +102,7 @@ type webhookResult struct {
 type webhookRouter struct {
 	// state reads the current config+metamodel snapshot.
 	state func() *Schema
-	// write is the serialized write surface (writeMu, manager, luaDeps).
+	// write is the write surface (manager, luaDeps).
 	write *writeHandler
 	// rawStore is the ungated store, used ONLY for the write-prep body re-read
 	// in applySteps. Reads that decide what a delivery acts on go through
@@ -94,12 +113,11 @@ type webhookRouter struct {
 	//
 	// This endpoint is unauthenticated BY DESIGN (the fronting proxy owns
 	// producer auth), so anyone who can reach the port can reach the write
-	// path. Each delivery takes the process-wide writeMu and holds it across a
-	// full type scan and the write, so without a bound a flood queues unbounded
-	// goroutines that stall every other writer — the SPA, actions, sync. That is
-	// the shape TKT-X06LA2 fixed on the sibling action surface by moving the
-	// authorization gate ahead of the lock; here there is no gate to move, so
-	// the bound IS the mitigation.
+	// path. Each delivery runs a full type scan and a write, so without a bound
+	// a flood turns into unbounded concurrent scans that starve the store for
+	// every other caller — the SPA, actions, other nodes. There is no
+	// authorization gate to move ahead of that work, so the bound IS the
+	// mitigation.
 	//
 	// Buffered channel rather than a semaphore package: the non-blocking send
 	// gives "reject immediately when full" for free, which is what a producer
@@ -112,9 +130,8 @@ type webhookRouter struct {
 
 // webhookMaxInFlight caps concurrent deliveries across all hooks.
 //
-// Sized for the mutex, not for CPU: deliveries serialize on writeMu anyway, so
-// admitting many more than this only grows a queue whose tail has already
-// timed out on the producer's side. Small enough that a flood is shed rather
+// Each delivery scans a whole entity type, so admitting many more than this
+// buys contention, not throughput. Small enough that a flood is shed rather
 // than absorbed, large enough that a legitimate burst from a monitoring fan-out
 // (Icinga dispatches notifications concurrently with no cap of its own) is not
 // rejected in normal operation.
@@ -253,35 +270,22 @@ func writeWebhookError(w http.ResponseWriter, hookID string, err error) {
 // runWebhookPipeline executes find → create-if-missing → then-steps under the
 // conflict-retry budget.
 //
-// Serialized on writeMu like every other mutation on this surface. Be precise
-// about what that buys, because the two halves differ:
+// Deliveries run concurrently, in this process and across processes. Both
+// halves detect a racing writer rather than relying on a lock:
 //
-//   - CREATE is genuinely conflict-detecting, with or without the lock. A
-//     racing create loses on the `unique:` constraint and the retry loop
-//     re-finds the winner, which works across processes because the postgres
-//     derived index is atomic.
-//   - APPEND is not. Patch.Content is an ABSOLUTE replacement computed from a
-//     base read moments earlier, and nothing below this is a compare-and-swap,
-//     so it is a read-modify-write that writeMu alone makes safe — and only
-//     within one process. Removing the lock fails
-//     TestWebhookConflict_PipelineAppendsAllLand on every run; across processes
-//     TestWebhookConflict_CrossProcessAppendsCanBeLost shows an append being
-//     lost even WITH it.
-//
-// The lock is therefore a stopgap for the append path, not the design. The fix
-// is store-level optimistic concurrency (TKT-34XS2R): an expected-version on
-// entity.Patch carried into store.UpdateEntity, so the append becomes a real
-// CAS and this lock can go. Nothing here should grow to depend on the lock in
-// a way that makes that removal harder.
-//
-// Note the same limitation sits under the data-entry API's If-Match, which also
-// reads-compares-writes inside writeMu rather than issuing a conditional write.
+//   - CREATE loses on the `unique:` constraint, which the manager checks and
+//     writes inside one store.Tx (and pgstore also backs with a derived
+//     index), and the retry loop re-finds the winner.
+//   - APPEND is a compare-and-swap. Patch.Content is an ABSOLUTE replacement
+//     computed from a base read moments earlier, so applySteps pins the patch
+//     to that base's version; a racing writer turns the write into a
+//     *store.VersionConflictError and the retry loop re-runs the attempt.
 func (h *webhookRouter) runPipeline(
 	ctx context.Context, hookID string, hook dataentryconfig.Webhook, payload webhookPayload,
 ) (webhookResult, error) {
-	// Shed load BEFORE taking the write lock. Queueing here instead would mean
-	// an unauthenticated flood parks goroutines that each go on to stall every
-	// other writer; a 429 the producer can retry is the better answer. A nil
+	// Shed load BEFORE doing any work. Queueing here instead would mean an
+	// unauthenticated flood parks goroutines that each go on to scan the
+	// store; a 429 the producer can retry is the better answer. A nil
 	// channel means unbounded, which only happens in tests that construct the
 	// router directly.
 	if h.admit != nil {
@@ -292,9 +296,6 @@ func (h *webhookRouter) runPipeline(
 			return webhookResult{}, errWebhookBusy
 		}
 	}
-
-	h.write.writeMu.Lock()
-	defer h.write.writeMu.Unlock()
 
 	var lastErr error
 	for attempt := range webhookMaxAttempts {
@@ -316,6 +317,11 @@ func (h *webhookRouter) runPipeline(
 		lastErr = err
 		slog.Debug("webhook write conflict, retrying",
 			"hook", hookID, "attempt", attempt+1, "error", err)
+		if attempt+1 < webhookMaxAttempts {
+			if err := webhookRetryPause(ctx, attempt+1); err != nil {
+				return webhookResult{}, err
+			}
+		}
 	}
 	return webhookResult{}, fmt.Errorf("%w: %w", errWebhookConflictExhausted, lastErr)
 }
@@ -515,20 +521,16 @@ func (h *webhookRouter) createEntity(
 // TestWebhookConflict_BlindUpdateLosesAppends demonstrates that loss against
 // postgres, to document what is being avoided.
 //
-// The re-read narrows the read-compute-write to this call. Be precise about
-// what that is worth:
+// The re-read is the base the append is computed from, and its version is the
+// patch's ExpectedVersion. So the write is a compare-and-swap: a writer that
+// lands between the re-read and the patch, in this process or another, makes
+// PatchEntity fail with *store.VersionConflictError, which isWebhookConflict
+// classifies as retryable, and the next attempt re-reads.
 //
-//   - In-process it is BELT AND BRACES. writeMu serializes deliveries, and each
-//     retry attempt re-runs findWebhookTarget, so on the find path `target`
-//     already carries a fresh body. Disabling the re-read does not fail the
-//     concurrency test, and that is expected.
-//   - On the CREATE path it is load-bearing in a different way: `target` there
-//     is the entity as constructed, whose Content does not reflect what
-//     templates and on-create automations actually persisted. Splicing onto the
-//     stored body is what keeps a template-provided section from being dropped.
-//   - ACROSS processes a residual window remains, because nothing here is a
-//     compare-and-swap. Closing it needs a server-side append mode on
-//     entity.Patch, which the ticket names as a follow-up, not a v1 requirement.
+// On the CREATE path the re-read matters for a second reason: `target` there
+// is the entity as constructed, whose Content does not reflect what templates
+// and on-create automations actually persisted. Splicing onto the stored body
+// is what keeps a template-provided section from being dropped.
 //
 // The re-read is RAW (the manager's own store handle), matching PatchEntity's
 // write-prep read: a redacted body would be written back over the stored one.
@@ -546,6 +548,7 @@ func (h *webhookRouter) applySteps(
 			return fmt.Errorf("webhook re-read body: %w", err)
 		}
 		content = fresh.Content
+		patch.ExpectedVersion = string(store.VersionOf(fresh))
 	}
 
 	for i, step := range hook.Then {
@@ -645,29 +648,18 @@ func flattenToLine(s string) string {
 // uniqueness collision on create, or a generic store conflict (the shape a
 // stale-state update surfaces as).
 func isWebhookConflict(err error) bool {
-	var unique store.UniquePropertyError
-	if errors.As(err, &unique) {
-		return true
-	}
-	// A unique violation reaches us as a VALIDATION error, not a store error,
-	// and by two different routes: entitymanager's pre-write scan raises one
-	// directly (no store error exists to wrap), while pgstore's derived index
-	// raises store.UniquePropertyError which the manager then re-presents as
-	// the same 422. Matching on the validation type covers both, and is what
-	// makes the retry loop reachable at all — matching only the store error
-	// left it dead on the path most conflicts actually take.
+	// Matching on the unique validation error, not only the store error, is
+	// what makes the retry loop reachable at all: the manager's pre-write scan
+	// raises it with no store error to wrap.
 	//
-	// Deliberately narrow: ONLY ValidationErrorUnique counts. Any other
+	// Deliberately narrow: ONLY a unique collision counts. Any other
 	// validation failure ("status must be one of...") is a genuine rejection
 	// that re-running would reproduce forever, so it must NOT be retried.
-	var invalid *entitymanager.ValidationError
-	if errors.As(err, &invalid) {
-		for _, v := range invalid.Errors {
-			if v.Type == metamodel.ValidationErrorUnique {
-				return true
-			}
-		}
+	if entitymanager.IsUniqueViolation(err) {
+		return true
 	}
+	// ErrConflict also matches *store.VersionConflictError, which is how a
+	// lost append_section compare-and-swap arrives (see applySteps).
 	return errors.Is(err, store.ErrConflict)
 }
 

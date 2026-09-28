@@ -12,6 +12,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/config"
 	"github.com/Sourcehaven-BV/rela/internal/datamigration"
 	"github.com/Sourcehaven-BV/rela/internal/entity"
+	"github.com/Sourcehaven-BV/rela/internal/lock"
 	"github.com/Sourcehaven-BV/rela/internal/lua"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/project"
@@ -135,6 +136,8 @@ func newCLIBundles(svc *appbuild.Services) (*cliBundles, error) {
 		Store:         svc.Store(),
 		Meta:          svc.Meta(),
 		EntityManager: svc.EntityManager(),
+		Locker:        lock.For(svc.Store()),
+		Authorizer:    attachment.AllowAllWrites{}, // operator shell: no ACL
 		// Native MIME allowlist on the CLI attach path too (runner nil →
 		// no external scan/transform until the cmd: harness is wired).
 		Processor: attachment.NewPolicyProcessor(svc.Meta(), nil),

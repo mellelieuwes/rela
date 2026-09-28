@@ -204,6 +204,8 @@ test-verbose:
 test-postgres:
     @echo "Running postgres-tagged tests (needs RELA_TEST_DATABASE_URL)..."
     go test -race -tags postgres ./internal/store/pgstore/... ./internal/jobs/...
+    go test -race -tags postgres -run 'TestConcurrency_' ./internal/entitymanager/
+    go test -race -tags postgres -run 'TestWebhookConflict' ./internal/dataentry/
 
 # Run the attachment scan tests against a REAL clamd (needs clamav-daemon
 # running locally). Every other scan test substitutes a stub `sh -c` command,

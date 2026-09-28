@@ -315,3 +315,72 @@ func TestCascadeWrite_TransitionRecheckedAfterAutomation(t *testing.T) {
 		}
 	}
 }
+
+// TestCascadeWrite_ComputedDependentOnAutomationValue pins that a cascade
+// automation may set a property a computed property derives from. The
+// computed value changes with it; that is a re-evaluation, not an authored
+// computed write, and must not be rejected.
+func TestCascadeWrite_ComputedDependentOnAutomationValue(t *testing.T) {
+	withOrder := strings.Replace(computedMetaYAML, "relations: {}", `  order:
+    label: Order
+    plural: orders
+    id_prefix: "O-"
+    id_type: sequential
+    properties:
+      name:
+        type: string
+relations: {}`, 1)
+	meta, err := metamodel.Parse([]byte(withOrder))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := memstore.New()
+	engine := automation.NewEngine([]automation.Automation{
+		{
+			Name: "spawn-item",
+			On:   automation.Trigger{Entity: []string{"order"}, Created: true},
+			Do: []automation.Action{{CreateEntity: &automation.CreateEntityAction{
+				Type: "item", Properties: map[string]string{"source": "2"},
+			}}},
+		},
+		{
+			Name: "item-source",
+			On:   automation.Trigger{Entity: []string{"item"}, Created: true},
+			Do:   []automation.Action{{Set: "source", Value: "4"}},
+		},
+	})
+	runner, err := autocascade.New(autocascade.Deps{Engine: engine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := entitymanager.New(entitymanager.Deps{
+		Store: st, Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{},
+		ACL: acl.NopACL{}, Automations: engine, Cascade: runner,
+		Transitions: statemachine.EmptySet(), FieldGate: entitymanager.AllowAllFieldGate{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := mgr.CreateEntity(context.Background(), entity.New("", "order"), entity.CreateOptions{})
+	if err != nil {
+		t.Fatalf("CreateEntity: %v", err)
+	}
+	for _, msg := range res.AutomationErrors {
+		t.Errorf("cascade error: %s", msg)
+	}
+
+	var child *entity.Entity
+	for e, err := range st.ListEntities(context.Background(), store.EntityQuery{Type: "item"}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		child = e
+	}
+	if child == nil {
+		t.Fatal("the cascade created no child")
+	}
+	if got := child.Properties["doubled"]; got != int64(8) {
+		t.Errorf("child doubled = %v, want 8 (source 4 set by the cascade)", got)
+	}
+}

@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Sourcehaven-BV/rela/internal/acl"
@@ -95,12 +94,11 @@ type entityMutator interface {
 // so the two paths cannot drift (uniform-404 read gate, affordance-denial
 // audit, one ETag definition).
 //
-// writeMu is a POINTER to App's mutation mutex: every handler here serializes
-// against the extracted sync/attachment handlers, exactly as before. With the
-// action surface moved in, writeHandler covers the complete data-entry write
-// surface — no App method takes writeMu directly anymore. (The DEC-8UIL0 arc
-// later replaces this mutex with the store's Tx contract; that is deliberately
-// NOT part of this refactor.)
+// There is no handler-level write lock (TKT-WE0S2K). Correctness under
+// concurrent writers comes from below: store-level compare-and-swap, the
+// manager's store.Tx around its check-then-write steps, and keyed locks in
+// the attachment service. A process-wide mutex could not provide it anyway
+// once several rela-server processes share one database.
 type writeHandler struct {
 	schema      func() *Schema
 	store       store.Store
@@ -111,9 +109,8 @@ type writeHandler struct {
 	acl         func() acl.ACL
 	audit       func() audit.Audit
 
-	// The Lua action surface (interactive actions + webhook dispatch) —
-	// scripts may mutate the workspace, so they run under writeMu. All three
-	// are live closures over App: the engine so fixtures that build App
+	// The Lua action surface (interactive actions + webhook dispatch). All
+	// three are live closures over App: the engine so fixtures that build App
 	// piecemeal see late-set fields, luaDeps because the bundle is derived
 	// per call from swappable collaborators, fullScriptDetail because the
 	// security layer is wired after construction (SetSecurityConfig).
@@ -145,22 +142,16 @@ type writeHandler struct {
 	paths *project.Context
 
 	// provision implements unmatched_principal: provision (TKT-ANUJDS). Called
-	// at the top of each write handler, under the writeMu it already holds; it
-	// lazily creates a stub user entity for an unmatched verified principal and
-	// returns a ctx re-stamped to it (with a rebuilt ACL request + read gate).
+	// at the top of each write handler via withProvision; it lazily creates a
+	// stub user entity for an unmatched verified principal and returns a ctx
+	// re-stamped to it (with a rebuilt ACL request + read gate).
 	// The handler adopts the returned ctx. A no-op on every non-provision write.
 	provision func(context.Context) context.Context
-
-	writeMu *sync.Mutex
 }
 
-// enterWrite acquires the write lock and runs the provision seam under it,
-// returning the CONTEXT the handler must thread downstream — re-stamped to a
-// freshly-provisioned entity when unmatched_principal: provision fired, else the
-// request's own context unchanged. The caller MUST `defer h.writeMu.Unlock()`
-// itself — the unlock cannot live here because it must span the whole handler
-// body. Running provision under the lock already held serializes the stub create
-// against every other mutation for free (see maybeProvision).
+// withProvision runs the provision seam and returns the request the handler
+// must use downstream: re-stamped to a freshly-provisioned entity when
+// unmatched_principal: provision fired, else r unchanged.
 //
 // It returns the re-stamped *http.Request (not just a context) on purpose: the
 // downstream read gate is consulted via helpers that take r and read
@@ -172,9 +163,8 @@ type writeHandler struct {
 // contextcheck flags the resulting r.Context() reads as "non-inherited" because
 // it cannot trace the derivation through the request reassignment; that whole
 // class is excluded by path in .golangci.yml with the seam pinned by
-// TestProvisionSeam_EveryWriteHandlerUsesEnterWrite.
-func (h *writeHandler) enterWrite(r *http.Request) *http.Request {
-	h.writeMu.Lock()
+// TestProvisionSeam_EveryWriteHandlerUsesWithProvision.
+func (h *writeHandler) withProvision(r *http.Request) *http.Request {
 	if h.provision != nil {
 		return r.WithContext(h.provision(r.Context()))
 	}
@@ -366,9 +356,7 @@ func (h *writeHandler) writeCreateRelations(
 }
 
 func (h *writeHandler) handleV1CreateEntity(w http.ResponseWriter, r *http.Request, typeName, plural string) {
-	// Need write lock for creation
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 
 	var req struct {
 		ID         string            `json:"id,omitempty"`
@@ -492,11 +480,11 @@ func (h *writeHandler) handleV1CreateEntity(w http.ResponseWriter, r *http.Reque
 // filter enum options, and show as-you-type validation feedback before
 // commit (TKT-3I5U).
 //
-// It is READ-shaped (RR-R8OR): it never takes h.writeMu and snapshots
+// It is READ-shaped (RR-R8OR): it skips the provision seam and snapshots
 // state once like a GET. It is verdict-only (RR-4O6E): it computes
 // affordances and warnings but emits NO `denied-write` audit row and
 // performs NO write — so live re-derivation per keystroke can't flood
-// the audit log or contend the writer lock.
+// the audit log.
 //
 // The verdicts are ADVISORY (RR-Y85M): the real create (POST without
 // ?dry_run) re-runs the BUG-Q60V affordance gate and is the sole
@@ -641,6 +629,10 @@ func (h *writeHandler) handleV1DryRunCreate(w http.ResponseWriter, r *http.Reque
 // different depths (TKT-34XS2R), so giving them one status keeps the client
 // contract unchanged.
 //
+// Without If-Match the manager retries conflicts itself, so a conflict that
+// still surfaces means it ran out of retries under sustained contention.
+// That is a 409: the client set no precondition, so 412 would be wrong.
+//
 // Matching is by errors.As, never on the message: the manager wraps the store
 // error on its way up, and RR-HI9QIU is what happens when a translation
 // breaks that chain — a retry loop silently becomes unreachable and every
@@ -651,6 +643,11 @@ func writePatchError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	var conflict *store.VersionConflictError
 	if errors.As(err, &conflict) {
+		if r.Header.Get("If-Match") == "" {
+			writeV1Error(w, r, http.StatusConflict, "conflict",
+				"Entity is being modified concurrently", "retry the request")
+			return
+		}
 		writeV1Error(w, r, http.StatusPreconditionFailed, "precondition_failed",
 			"Entity has been modified", "concurrent write detected")
 		return
@@ -660,9 +657,7 @@ func writePatchError(w http.ResponseWriter, r *http.Request, err error) {
 
 //nolint:gocognit,funlen // update handler threads the validation-policy classes (400/422/200-with-warnings) through each field; the branches are the documented write-policy cases, not extractable shared logic.
 func (h *writeHandler) handleV1UpdateEntity(w http.ResponseWriter, r *http.Request, typeName, plural, entityID string) {
-	// Need write lock
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 
 	s := h.schema()
 
@@ -806,14 +801,12 @@ func (h *writeHandler) handleV1UpdateEntity(w http.ResponseWriter, r *http.Reque
 		//  1. Properties this request does not name are preserved by the
 		//     manager's own merge against the raw stored entity, so a
 		//     redacted read can no longer erase what it could not see.
-		//  2. The If-Match check stops depending on writeMu for correctness.
-		//     Comparing the header to a freshly-read ETag and then writing is
-		//     a check-then-write, safe only while one process-local mutex
-		//     serializes it — and rela documents several rela-server
-		//     processes against one database. The store now re-verifies the
-		//     precondition ATOMICALLY with the write, so a racing writer that
-		//     lands between our read and our write is caught rather than
-		//     silently overwritten.
+		//  2. The If-Match check is not a check-then-write. Comparing the
+		//     header to a freshly-read ETag and then writing would race any
+		//     concurrent writer; the store re-verifies the precondition
+		//     ATOMICALLY with the write, so a racing writer that lands between
+		//     our read and our write is caught rather than silently
+		//     overwritten.
 		//
 		// The ETag compare above stays: it is the client-facing contract and
 		// is relation-aware, which the store token deliberately is not.
@@ -886,9 +879,7 @@ func (h *writeHandler) handleV1UpdateEntity(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *writeHandler) handleV1DeleteEntity(w http.ResponseWriter, r *http.Request, typeName, _, entityID string) {
-	// Need write lock
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 
 	// The path segment is an ADDRESS (see entityRef). `ID` and `ID@<bare>`
 	// delete the whole entity; `ID@face` for a non-bare face deletes THAT
@@ -957,9 +948,16 @@ func (h *writeHandler) writeRelationsValidationError(w http.ResponseWriter, r *h
 // This is the documented atomicity gap. ACL denials short-circuit to
 // the structured 403 path; a dangling-peer structuralError maps to 422
 // (the reference did not resolve, so the edge was not stored —
-// BUG-K6FEVB); everything else falls through to the 500-with-detail body.
+// BUG-K6FEVB); an edge that concurrent requests kept creating and deleting
+// under this one maps to 409; everything else falls through to the
+// 500-with-detail body.
 func (h *writeHandler) writeRelationsApplyError(w http.ResponseWriter, r *http.Request, err error) {
 	if writeForbiddenIfACLDenied(w, err) {
+		return
+	}
+	if errors.Is(err, entitymanager.ErrRelationAlreadyExists) || errors.Is(err, entitymanager.ErrRelationNotFound) {
+		writeV1Error(w, r, http.StatusConflict, "conflict",
+			"A concurrent request changed the same relation; retry", reconcileDetail(err))
 		return
 	}
 	if se, ok := asStructuralError(err); ok {
@@ -975,9 +973,7 @@ func (h *writeHandler) writeRelationsApplyError(w http.ResponseWriter, r *http.R
 func (h *writeHandler) handleV1CreateRelation(
 	w http.ResponseWriter, r *http.Request, typeName string, ref entityRef, relType string,
 ) {
-	// Need write lock
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 
 	// ACL gate (TKT-VQGN CRIT-2): runs BEFORE body parse (RR-FGUZ
 	// applied to relation writes) and BEFORE the affordance check —
@@ -1085,9 +1081,7 @@ func (h *writeHandler) handleV1CreateRelation(
 func (h *writeHandler) handleV1UpdateRelation(
 	w http.ResponseWriter, r *http.Request, typeName string, ref entityRef, relType, targetID string,
 ) {
-	// Need write lock
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 
 	// ACL gate (TKT-VQGN CRIT-2): see handleV1CreateRelation. BARE id.
 	if !h.gateRead(w, r, typeName, ref.ID) {
@@ -1175,9 +1169,7 @@ func (h *writeHandler) handleV1UpdateRelation(
 func (h *writeHandler) handleV1DeleteRelation(
 	w http.ResponseWriter, r *http.Request, typeName string, ref entityRef, relType, targetID string,
 ) {
-	// Need write lock
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 
 	// ACL gate (TKT-VQGN CRIT-2): see handleV1CreateRelation. BARE id.
 	if !h.gateRead(w, r, typeName, ref.ID) {
@@ -1223,9 +1215,7 @@ func (h *writeHandler) handleV1DeleteRelation(
 func (h *writeHandler) handleV1CloneEntity(
 	w http.ResponseWriter, r *http.Request, typeName string, ref entityRef,
 ) {
-	// Need write lock
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 
 	s := h.schema()
 
@@ -1295,8 +1285,7 @@ func (h *writeHandler) handleV1ConflictResolve(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	r = h.enterWrite(r)
-	defer h.writeMu.Unlock()
+	r = h.withProvision(r)
 
 	st := h.schema()
 
