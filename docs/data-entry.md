@@ -1004,6 +1004,7 @@ relations, so `related(...)` is refused here at startup.
 | String / number / boolean / nil literals | `'open'`, `3`, `true`, `false`, `nil` |
 | Comparisons | `==` `!=` `<` `<=` `>` `>=`, regex `=~` |
 | Boolean logic | `and`, `or`, `not`, parentheses |
+| Choose a value | `c and x or y` (see below) |
 
 Examples:
 
@@ -1021,6 +1022,12 @@ Notes:
   the string `'3'`.
 - A condition may reference **any** earlier field; referencing a field the user
   hasn't reached yet simply reads as unset (`nil`).
+- `and`/`or` return one of their operands, as in Lua, so they can choose a
+  value: `(form.nick or 'anon') == 'anon'` is true when the nickname is unset.
+  In the browser an empty string, `0`, `false` and a field that cannot be
+  evaluated also count as unset here, so an empty field falls through to the
+  next alternative. End a selection with a literal default (`or 'none'`):
+  the browser recognizes a selection by its literal values.
 - Conditions are a **UX affordance only** — the server re-validates every write
   regardless of what the wizard showed or hid. Do not rely on `required_when`
   as a server-side constraint.

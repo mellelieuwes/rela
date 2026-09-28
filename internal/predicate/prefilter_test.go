@@ -481,3 +481,41 @@ func TestConjunction_TraversalOnAnotherRecordIsNotExact(t *testing.T) {
 		t.Fatal("a traversal from current_user must not lower as the row's traversal")
 	}
 }
+
+// A value-selecting `and` is not a conjunction: its operands are not
+// constraints on the entity, so neither prefilter may read equalities
+// out of it.
+func TestPrefilter_IgnoresValueSelection(t *testing.T) {
+	env := prefilterEnv(t)
+	for _, src := range []string{
+		"(entity.status == 'open' and 'a' or 'b') == 'a'",
+		"(entity.assignee == current_user.id and 'mine' or 'other') == 'mine'",
+	} {
+		t.Run(src, func(t *testing.T) {
+			prog, err := Compile(env, src)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			if eqs := prog.ConstEqualities(fullSpec); len(eqs) != 0 {
+				t.Fatalf("ConstEqualities = %v, want none", eqs)
+			}
+			if _, _, ok := prog.Conjunction(fullSpec); ok {
+				t.Fatal("Conjunction must refuse a comparison over a selection")
+			}
+		})
+	}
+	// The guard itself: a selecting `and` reached directly is skipped.
+	sel := &logicalNode{op: "and", typ: StringType,
+		lhs: &relationalNode{op: "==", lhs: &attrNode{obj: &varNode{name: "entity"}, name: "status"}, rhs: &constNode{v: NewString("open")}},
+		rhs: &constNode{v: NewString("a")}}
+	out := map[string]ConstEquality{}
+	collectConstEqualities(sel, fullSpec, out)
+	if len(out) != 0 {
+		t.Fatalf("collectConstEqualities = %v, want none", out)
+	}
+	var leaves []node
+	collectConjuncts(sel, &leaves)
+	if len(leaves) != 1 || leaves[0] != node(sel) {
+		t.Fatalf("collectConjuncts split a selection: %v", leaves)
+	}
+}

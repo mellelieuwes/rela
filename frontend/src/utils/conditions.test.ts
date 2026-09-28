@@ -90,6 +90,49 @@ describe('conditions', () => {
     })
   })
 
+  describe('value selection with and/or (TKT-WQJGPS)', () => {
+    const level = "(form.method == 'passkey' and 'high' or form.method == 'otp' and 'medium' or 'low') == "
+
+    it('chooses a value like predicate', () => {
+      expect(evalWith(level + "'high'", { form: { method: 'passkey' } })).toBe(true)
+      expect(evalWith(level + "'medium'", { form: { method: 'otp' } })).toBe(true)
+      expect(evalWith(level + "'low'", { form: { method: 'password' } })).toBe(true)
+      expect(evalWith(level + "'low'", { form: {} })).toBe(true)
+    })
+
+    it('or supplies a default for a missing or empty field', () => {
+      expect(evalWith("(form.nick or 'anon') == 'anon'", { form: {} })).toBe(true)
+      expect(evalWith("(form.nick or 'anon') == 'anon'", { form: { nick: '' } })).toBe(true)
+      expect(evalWith("(form.nick or 'anon') == 'ada'", { form: { nick: 'ada' } })).toBe(true)
+    })
+
+    it('a false condition yields a falsy operand', () => {
+      expect(evalWith("form.flag and 'x'", { form: { flag: false } })).toBe(false)
+      expect(evalWith("(form.flag and 'x') == 'x'", { form: { flag: true } })).toBe(true)
+    })
+
+    it('boolean logic inside a comparison still yields a bool', () => {
+      expect(evalWith('(form.a and form.b) == false', { form: {} })).toBe(true)
+      expect(evalWith('(form.a or form.b) == false', { form: {} })).toBe(true)
+      expect(evalWith('(form.a or form.b) == true', { form: { a: 'yes' } })).toBe(true)
+      expect(evalWith('(form.a and form.b) == true', { form: { a: true, b: 'yes' } })).toBe(true)
+    })
+
+    it('a reference branch inside a selection is a value', () => {
+      const src = "(form.flag and form.nick or 'anon') == 'ada'"
+      expect(evalWith(src, { form: { flag: true, nick: 'ada' } })).toBe(true)
+      expect(evalWith("(form.flag and form.nick or 'anon') == 'anon'", { form: { flag: false } })).toBe(true)
+      expect(evalWith("(form.flag and 'on') == nil", { form: { flag: false } })).toBe(true)
+    })
+
+    it('boolean logic keeps its truthiness, including failing operands', () => {
+      expect(evalWith('form.a or form.b', { form: { a: '', b: true } })).toBe(true)
+      expect(evalWith('form.a and form.b', { form: { a: true, b: 0 } })).toBe(false)
+      expect(evalWith('not (form.a and nope())', { form: { a: true } })).toBe(true)
+      expect(evalWith('nope() or form.b', { form: { b: true } })).toBe(true)
+    })
+  })
+
   describe('operators, precedence & associativity (RR-8VZSP)', () => {
     it('a == b and c == d or e groups as ((a==b) and (c==d)) or e', () => {
       // e true dominates via or, regardless of the and clause.

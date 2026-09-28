@@ -190,6 +190,8 @@ func TestApplyListFilters(t *testing.T) {
 		{"filter negative-literal-free numeric", nil, "entity.priority >= 5", []string{"T-2", "T-3"}},
 		{"where + filter combined (ANDed)", []string{"status=ready"}, "entity.priority > 5", []string{"T-3"}},
 		{"no filters returns all", nil, "", []string{"T-1", "T-2", "T-3"}},
+		{"filter value selection", nil,
+			"(entity.priority > 4 and 'high' or 'low') == 'high'", []string{"T-2", "T-3"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -105,6 +105,9 @@ func (w *walker) coerceLiteralOperands(lhs, rhs node, line int) (newLHS, newRHS 
 // was attempted) — distinguishing "coerced or errored" from "not
 // applicable, leave operands alone."
 func coerceOneLiteral(lit node, target Type, line int) (out node, handled bool, err error) {
+	if ln, ok := lit.(*logicalNode); ok && ln.selects() {
+		return coerceSelection(ln, target, line)
+	}
 	cn, ok := lit.(*constNode)
 	if !ok {
 		return lit, false, nil
@@ -128,6 +131,31 @@ func coerceOneLiteral(lit node, target Type, line int) (out node, handled bool, 
 		return &constNode{v: v}, true, nil
 	}
 	return lit, false, nil
+}
+
+// coerceSelection coerces the literal value branches of a selecting
+// logicalNode to target, so `c and 10 or 0` can be an int and
+// `c and '2026-01-01' or entity.due` a date. The condition of an `and` is
+// left alone. The node is rebuilt, never mutated.
+func coerceSelection(n *logicalNode, target Type, line int) (out node, handled bool, err error) {
+	lhs, rhs := n.lhs, n.rhs
+	var lh, rh bool
+	if n.op == "or" {
+		if lhs, lh, err = coerceOneLiteral(lhs, target, line); err != nil {
+			return n, true, err
+		}
+	}
+	if rhs, rh, err = coerceOneLiteral(rhs, target, line); err != nil {
+		return n, true, err
+	}
+	if !lh && !rh {
+		return n, false, nil
+	}
+	typ, err := logicalType(n.op, lhs.resultType(), rhs.resultType(), line)
+	if err != nil {
+		return n, true, err
+	}
+	return &logicalNode{op: n.op, lhs: lhs, rhs: rhs, typ: typ}, true, nil
 }
 
 // maxExactIntLiteral is 2^53, the largest magnitude at which every
@@ -159,10 +187,10 @@ func coerceIntLiteral(v Value, line int) (Value, error) {
 	// dominate both conversions below (also keeps CodeQL happy about the
 	// hex-literal ParseUint value flowing in from parseLuaNumber).
 	if n.v >= maxExactIntLiteral || n.v <= -maxExactIntLiteral {
-		return nil, &CompileError{Line: line, Reason: fmt.Sprintf("integer literal %v is too large to compare exactly (must be within ±2^53)", n.v)}
+		return nil, &CompileError{Line: line, Reason: fmt.Sprintf("integer literal %v is too large to be an exact int (must be within ±2^53)", n.v)}
 	}
 	if n.v != float64(int64(n.v)) {
-		return nil, &CompileError{Line: line, Reason: fmt.Sprintf("cannot compare an int field with the non-integer literal %v", n.v)}
+		return nil, &CompileError{Line: line, Reason: fmt.Sprintf("the non-integer literal %v cannot be an int", n.v)}
 	}
 	return NewInt(int64(n.v)), nil
 }
@@ -296,13 +324,78 @@ func (w *walker) walkLogical(e *ast.LogicalOpExpr) (node, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !lhs.resultType().equalsType(BoolType) {
-		return nil, &CompileError{Line: e.Line(), Reason: fmt.Sprintf("'%s' requires bool on left, got %s", e.Operator, lhs.resultType().typeName())}
+	if e.Operator == "or" {
+		// Both operands of a selecting `or` are values, so a literal
+		// takes the int/date type of its sibling as in a comparison.
+		lhs, rhs, err = w.coerceLiteralOperands(lhs, rhs, e.Line())
+		if err != nil {
+			return nil, err
+		}
 	}
-	if !rhs.resultType().equalsType(BoolType) {
-		return nil, &CompileError{Line: e.Line(), Reason: fmt.Sprintf("'%s' requires bool on right, got %s", e.Operator, rhs.resultType().typeName())}
+	typ, err := logicalType(e.Operator, lhs.resultType(), rhs.resultType(), e.Line())
+	if err != nil {
+		return nil, err
 	}
-	return &logicalNode{op: e.Operator, lhs: lhs, rhs: rhs}, nil
+	return &logicalNode{op: e.Operator, lhs: lhs, rhs: rhs, typ: typ}, nil
+}
+
+// logicalType type-checks `and`/`or` and returns the result type: bool for
+// boolean logic, or the selected value type (see logicalNode). A value must
+// be a string, number, int or date; a bool value would bring back Lua's
+// `c and false or y` pitfall, which is why bool operands always mean logic.
+func logicalType(op string, lt, rt Type, line int) (Type, error) {
+	if lt.equalsType(BoolType) && rt.equalsType(BoolType) {
+		return BoolType, nil
+	}
+	if op == "and" {
+		if !lt.equalsType(BoolType) {
+			return nil, &CompileError{Line: line, Reason: "'and' requires bool on left, got " + lt.typeName()}
+		}
+		if err := checkSelectable(op, "right", rt, line); err != nil {
+			return nil, err
+		}
+		return rt, nil
+	}
+	if err := checkSelectable(op, "left", lt, line); err != nil {
+		return nil, err
+	}
+	if err := checkSelectable(op, "right", rt, line); err != nil {
+		return nil, err
+	}
+	if !lt.equalsType(rt) {
+		return nil, &CompileError{Line: line, Reason: fmt.Sprintf(
+			"'or' operands must have the same type, got %s and %s", lt.typeName(), rt.typeName())}
+	}
+	return preferLayout(lt, rt), nil
+}
+
+// checkSelectable rejects an operand that cannot be a selected value.
+func checkSelectable(op, side string, t Type, line int) error {
+	switch {
+	case t.equalsType(NilType):
+		return &CompileError{Line: line, Reason: fmt.Sprintf(
+			"'%s' cannot select nil on %s: 'c and nil or y' always yields y", op, side)}
+	case t.equalsType(StringType), t.equalsType(NumberType), t.equalsType(IntType), t.equalsType(DateType):
+		return nil
+	case t.equalsType(BoolType):
+		return &CompileError{Line: line, Reason: fmt.Sprintf(
+			"'%s' mixes bool and value operands: use bool on both sides for logic, "+
+				"or 'c and x or y' with values of one type to choose a value", op)}
+	}
+	return &CompileError{Line: line, Reason: fmt.Sprintf(
+		"'%s' requires bool, string, number, int or date on %s, got %s", op, side, t.typeName())}
+}
+
+// preferLayout returns whichever of two equal types carries a date parse
+// layout, so a later literal coercion against the selection uses it. When
+// both carry one, the left operand's layout wins.
+func preferLayout(a, b Type) Type {
+	if da, ok := a.(dateType); ok && da.layout == "" {
+		if db, ok := b.(dateType); ok {
+			return db
+		}
+	}
+	return a
 }
 
 func (w *walker) walkNot(e *ast.UnaryNotOpExpr) (node, error) {

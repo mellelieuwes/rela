@@ -39,7 +39,10 @@
  * which is accepted as a silent alias), and this engine is **permissive**
  * where predicate is strict — cross-type comparisons coerce here (see
  * {@link compareEq}) instead of being compile errors, and boolean positions
- * coerce truthiness instead of requiring a bool.
+ * coerce truthiness instead of requiring a bool. `c and x or y` chooses a
+ * value as in predicate (see {@link markSelections}); because '' and 0 are
+ * falsy here, an empty field or a zero also falls through to the next
+ * alternative, where predicate falls through on nil only.
  *
  * # Two responsibilities, one throw boundary
  *
@@ -149,7 +152,7 @@ type Node =
   | { kind: 'ref'; ns: string; field: string }
   | { kind: 'call'; name: string; args: Node[] }
   | { kind: 'not'; expr: Node }
-  | { kind: 'logical'; op: 'and' | 'or'; left: Node; right: Node }
+  | { kind: 'logical'; op: 'and' | 'or'; left: Node; right: Node; select?: boolean }
   | { kind: 'compare'; op: CompareOp; left: Node; right: Node }
 
 type CompareOp = '==' | '!=' | '<' | '<=' | '>' | '>=' | '=~'
@@ -521,7 +524,9 @@ function evalNode(node: Node, bindings: Bindings): Value {
       return !truthy(evalNode(node.expr, bindings))
 
     case 'logical': {
-      // Short-circuit on the truthiness of the (fail-safe) left operand.
+      if (node.select) return evalSelect(node, bindings)
+      // Boolean logic: short-circuit on the truthiness of the (fail-safe)
+      // left operand and always yield a bool.
       const left = truthyFailSafe(node.left, bindings)
       if (node.op === 'and') {
         return left ? truthyFailSafe(node.right, bindings) : false
@@ -536,12 +541,79 @@ function evalNode(node: Node, bindings: Bindings): Value {
 
 /** Evaluate a node's truthiness, coercing any per-node error to false. */
 function truthyFailSafe(node: Node, bindings: Bindings): boolean {
+  return truthy(valueFailSafe(node, bindings))
+}
+
+/** Evaluate a node, coercing any per-node error to false. */
+function valueFailSafe(node: Node, bindings: Bindings): Value {
   try {
-    return truthy(evalNode(node, bindings))
+    return evalNode(node, bindings)
   } catch (err) {
     if (err instanceof EvalFail) return false
     throw err
   }
+}
+
+type LogicalNode = Extract<Node, { kind: 'logical' }>
+
+/**
+ * Value selection, as in predicate: `c and x` yields x when c holds and nil
+ * otherwise; `x or y` yields x unless it is falsy. Falsy here includes '' and
+ * 0, so an empty field falls through where predicate falls through on nil only.
+ */
+function evalSelect(node: LogicalNode, bindings: Bindings): Value {
+  if (node.op === 'and') {
+    return truthyFailSafe(node.left, bindings) ? valueFailSafe(node.right, bindings) : NIL
+  }
+  const left = valueFailSafe(node.left, bindings)
+  return truthy(left) ? left : valueFailSafe(node.right, bindings)
+}
+
+/**
+ * Marks the `and`/`or` nodes that choose a value rather than combine bools.
+ * The engine is untyped, so it decides syntactically, as predicate's types
+ * would: a node selects when a value operand (the right of `and`, either side
+ * of `or`) is a string or number literal or a selecting node, and every
+ * logical node in a value operand of a selecting node selects too. A boolean
+ * condition never has such an operand, so it keeps yielding a bool, including
+ * inside a comparison. A selection whose values are all field references
+ * (`form.a or form.b`) is not detected; end it with a literal default.
+ */
+function markSelections(node: Node): boolean {
+  switch (node.kind) {
+    case 'logical': {
+      const l = markSelections(node.left)
+      const r = markSelections(node.right)
+      const valueOperands = node.op === 'and' ? [node.right] : [node.left, node.right]
+      const selects =
+        valueOperands.some(isValueLiteral) || r || (node.op === 'or' && l)
+      if (selects) propagateSelection(node)
+      return selects
+    }
+    case 'not':
+      markSelections(node.expr)
+      return false
+    case 'compare':
+      markSelections(node.left)
+      markSelections(node.right)
+      return false
+    case 'call':
+      node.args.forEach(markSelections)
+      return false
+    default:
+      return false
+  }
+}
+
+function propagateSelection(node: Node): void {
+  if (node.kind !== 'logical') return
+  node.select = true
+  if (node.op === 'or') propagateSelection(node.left)
+  propagateSelection(node.right)
+}
+
+function isValueLiteral(node: Node): boolean {
+  return node.kind === 'lit' && (typeof node.value === 'string' || typeof node.value === 'number')
 }
 
 function resolveRef(ns: string, field: string, bindings: Bindings): Value {
@@ -769,6 +841,7 @@ export function parse(source: string): Program {
   let program: Program
   try {
     const ast = new Parser(tokenize(source)).parse()
+    markSelections(ast)
     program = {
       source,
       eval(bindings: Bindings): boolean {

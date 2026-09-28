@@ -87,12 +87,32 @@
 // time: a number literal becomes an Int (fractional literals are rejected),
 // a string literal is parsed to a Date against the field's declared layout.
 //
+// The same coercion applies to value selection (below): a literal operand
+// of `or` takes its sibling's Int/Date type, a comparison against a
+// selection coerces the selection's literal branches, and a top-level
+// literal or all-literal selection is coerced to the profile's expected
+// type. Coercion does not reach into arithmetic operands or host-function
+// arguments at the top level: `-(c and 1 or 2)` stays a Number.
+//
 // Coercion at compile time is deliberate: it keeps Eval a pure function
 // with no parsing and no metamodel access (the Date is already a time.Time
 // by the time Eval runs), which is what lets the engine be used on the
 // read/ACL path. The metamodel->Env mapping (property type -> predicate
 // type, incl. the date layout) lives in internal/predicatefns so this
 // package stays dependency-free.
+//
+// # Value selection
+//
+// `and`/`or` with bool operands are boolean logic. With a bool condition and
+// values of one scalar type (string, number, int, date) they choose a value
+// as in Lua: `c and x` yields x when c is true and nil when it is false, and
+// `x or y` yields x unless it is nil. A bool is never a chosen value, which
+// rules out Lua's `c and false or y` pitfall; a nil value still falls
+// through, so `c and entity.opt or y` yields y when opt is absent. A nil
+// condition is an eval error, as in boolean logic. Selection is available
+// in every profile: it adds no capability a boolean profile could need to
+// withhold (the top level must still be bool there), unlike arithmetic,
+// which changes what a condition can compute.
 //
 // # Security model
 //

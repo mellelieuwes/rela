@@ -142,6 +142,17 @@ func compile(env *Env, source string, profile Profile, opts ...CompileOption) (p
 		return nil, walkErr
 	}
 
+	if !root.resultType().equalsType(profile.Expected) {
+		// A literal or an all-literal selection takes the expected int/date
+		// type, as it would against a typed operand.
+		coerced, handled, cErr := coerceOneLiteral(root, profile.Expected, retStmt.Exprs[0].Line())
+		if cErr != nil {
+			return nil, cErr
+		}
+		if handled {
+			root = coerced
+		}
+	}
 	if !root.resultType().equalsType(profile.Expected) && !root.resultType().equalsType(NilType) {
 		return nil, &CompileError{Reason: "top-level expression must be " + profile.Expected.typeName() + ", got " + root.resultType().typeName()}
 	}
@@ -176,7 +187,7 @@ func describeStmtAsNonExpression(s ast.Stmt) string {
 	case *ast.RepeatStmt:
 		return "repeat/until loops are not allowed"
 	case *ast.IfStmt:
-		return "if statements are not allowed (use 'a and b or c' for conditional values)"
+		return "if statements are not allowed (use 'c and x or y' to choose a value)"
 	case *ast.NumberForStmt, *ast.GenericForStmt:
 		return "for loops are not allowed"
 	case *ast.FuncDefStmt:

@@ -68,15 +68,25 @@ type relationalNode struct {
 func (*relationalNode) resultType() Type { return BoolType }
 func (*relationalNode) sealedNode()      {}
 
-// logicalNode is one of `and`, `or`. Lua-style short-circuit
-// evaluation is preserved (and returns rhs only if lhs is truthy).
+// logicalNode is one of `and`, `or`, with Lua-style short-circuit
+// evaluation. With bool operands it is boolean logic and typ is BoolType.
+// Otherwise it selects a value of the scalar type typ, as in Lua:
+// `c and x` yields x when c is true and nil when it is false, and
+// `x or y` yields x unless x is nil. The condition of a selecting `and`
+// must be a bool; a nil condition is an eval error, unlike SQL, where
+// `CASE WHEN NULL` takes the ELSE branch. A SQL lowering must keep the
+// error (TKT-WQJGPS); boolean `and`/`or` have the same property.
 type logicalNode struct {
 	op       string
 	lhs, rhs node
+	typ      Type
 }
 
-func (*logicalNode) resultType() Type { return BoolType }
-func (*logicalNode) sealedNode()      {}
+func (n *logicalNode) resultType() Type { return n.typ }
+func (*logicalNode) sealedNode()        {}
+
+// selects reports whether n chooses a value rather than combining bools.
+func (n *logicalNode) selects() bool { return !n.typ.equalsType(BoolType) }
 
 // notNode is unary `not`.
 type notNode struct {

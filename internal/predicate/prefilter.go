@@ -127,7 +127,11 @@ func collectConstEqualities(n node, spec PrefilterSpec, out map[string]ConstEqua
 	)
 	switch x := n.(type) {
 	case *logicalNode:
-		if x.op != "and" {
+		// A selecting `and` cannot sit on a bool program's AND spine (the
+		// walker rejects mixing bool and value operands); the check keeps a
+		// direct call on a value program from reading its condition as a
+		// constraint.
+		if x.op != "and" || x.selects() {
 			return
 		}
 		collectConstEqualities(x.lhs, spec, out)
@@ -291,9 +295,10 @@ func (p *Program) Conjunction(spec PrefilterSpec) (eqs []ConstEquality, traversa
 	return eqs, traversals, true
 }
 
-// collectConjuncts flattens the top-level AND spine into its leaves.
+// collectConjuncts flattens the top-level AND spine into its leaves. A
+// selecting `and` is a leaf; see collectConstEqualities.
 func collectConjuncts(n node, out *[]node) {
-	if l, isLogical := n.(*logicalNode); isLogical && l.op == "and" {
+	if l, isLogical := n.(*logicalNode); isLogical && l.op == "and" && !l.selects() {
 		collectConjuncts(l.lhs, out)
 		collectConjuncts(l.rhs, out)
 		return

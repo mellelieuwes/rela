@@ -456,6 +456,9 @@ func cmpString(op, x, y string) bool {
 }
 
 func (s *evalState) evalLogical(ctx context.Context, n *logicalNode) (Value, error) {
+	if n.selects() {
+		return s.evalSelect(ctx, n)
+	}
 	lhs, err := s.eval(ctx, n.lhs)
 	if err != nil {
 		return nil, err
@@ -484,6 +487,30 @@ func (s *evalState) evalLogical(ctx context.Context, n *logicalNode) (Value, err
 		return nil, &EvalError{Reason: fmt.Sprintf("'%s' rhs: expected bool, got %s", n.op, rhs.Type().typeName())}
 	}
 	return rb, nil
+}
+
+// evalSelect evaluates a value-selecting `and`/`or` with Lua semantics.
+// Values are never bool (the walker rejects them), so only nil falls
+// through `or`.
+func (s *evalState) evalSelect(ctx context.Context, n *logicalNode) (Value, error) {
+	lhs, err := s.eval(ctx, n.lhs)
+	if err != nil {
+		return nil, err
+	}
+	if n.op == "and" {
+		cond, ok := lhs.(Bool)
+		if !ok {
+			return nil, &EvalError{Reason: "'and' lhs: expected bool, got " + lhs.Type().typeName()}
+		}
+		if !cond.v {
+			return NewNil(), nil
+		}
+		return s.eval(ctx, n.rhs)
+	}
+	if _, isNil := lhs.(Nil); !isNil {
+		return lhs, nil
+	}
+	return s.eval(ctx, n.rhs)
 }
 
 func (s *evalState) evalNot(ctx context.Context, n *notNode) (Value, error) {
