@@ -37,8 +37,9 @@ func NewAllowAllReader(get EntityGetter) (*AllowAllReader, error) {
 }
 
 // Get implements [Reader]: plain load plus the stored-type check.
-func (r *AllowAllReader) Get(ctx context.Context, entityType, id string) (*entity.Entity, bool, error) {
-	e, err := r.get.GetEntity(ctx, id)
+func (r *AllowAllReader) Get(ctx context.Context, entityType, addr string) (*entity.Entity, bool, error) {
+	id, face := parseAddress(addr)
+	e, err := r.get.GetEntityState(ctx, id, face)
 	if err != nil {
 		return nil, false, nil //nolint:nilerr // store miss == not-found, by design
 	}

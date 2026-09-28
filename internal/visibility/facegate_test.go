@@ -71,7 +71,7 @@ func (plainRowGate) PermitsReadMany(
 // faceGetter serves one entity, at a face the test chooses.
 type faceGetter struct{ e *entity.Entity }
 
-func (g faceGetter) GetEntity(context.Context, string) (*entity.Entity, error) {
+func (g faceGetter) GetEntityState(context.Context, string, entity.Face) (*entity.Entity, error) {
 	if g.e == nil {
 		return nil, errors.New("not found")
 	}

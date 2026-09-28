@@ -147,3 +147,44 @@ func TestClassifyReadError(t *testing.T) {
 		t.Errorf("unknown errors should pass through unchanged, got %v", passthrough)
 	}
 }
+
+// TestShowFaceAddress pins that `rela show ID@face` lists the entity's
+// relations. Relations are keyed on the bare id, so querying them by the typed
+// address matched nothing and showed an entity with no relations (BUG-R1PQY9).
+// Outgoing edges are the addressed face's own.
+func TestShowFaceAddress(t *testing.T) {
+	meta := metamodel.DefaultMetamodel()
+	seeder := newStoreSeeder(meta)
+	seeder.addEntity(testutil.EntityFor(meta, "requirement").ID("REQ-001"))
+	draft := testutil.EntityFor(meta, "requirement").ID("REQ-001").WithTitle("draft title").Build()
+	draft.Face = "draft"
+	seeder.addEntity(testutil.EntityFor(meta, "decision").ID("DEC-001"))
+	seeder.addEntity(testutil.EntityFor(meta, "solution").ID("SOL-001"))
+	seeder.addEntity(testutil.EntityFor(meta, "solution").ID("SOL-002"))
+	ctx := context.Background()
+	if err := seeder.s.CreateEntity(ctx, draft); err != nil {
+		t.Fatal(err)
+	}
+	seeder.addRelation("DEC-001", "addresses", "REQ-001")
+	seeder.addRelation("REQ-001", "implements", "SOL-001")
+	if _, err := seeder.s.CreateRelation(ctx, "REQ-001", "implements", "SOL-002",
+		&store.RelationData{FromFace: draft.Face}); err != nil {
+		t.Fatal(err)
+	}
+	svc := seeder.build(t).read
+	buf := withOutput(t, output.FormatTable)
+
+	if err := (&ShowCmd{ID: "REQ-001@draft"}).Run(ctx, svc); err != nil {
+		t.Fatalf("show command failed: %v", err)
+	}
+
+	result := buf.String()
+	for _, want := range []string{"draft title", "DEC-001", "SOL-002"} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %q in output, got: %s", want, result)
+		}
+	}
+	if strings.Contains(result, "SOL-001") {
+		t.Errorf("the default face's outgoing edge leaked into the draft's: %s", result)
+	}
+}

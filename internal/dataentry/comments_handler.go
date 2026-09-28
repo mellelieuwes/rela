@@ -72,7 +72,14 @@ func (h *commentsHandler) handleV1Comments(w http.ResponseWriter, r *http.Reques
 	// Validate the path segments before they reach storage. The file backend
 	// guards itself too, but refusing here keeps an unsafe id from reaching any
 	// backend at all, and gives a 400 rather than an opaque store error.
-	if !isSafePathSegment(typeName) || !isSafeStateRefSegment(entityID) {
+	//
+	// The id segment is an ADDRESS (`ID` or `ID@face`) and is parsed here,
+	// once, into the bare id and the face (BUG-R1PQY9). Handing the raw
+	// segment to a bare-id reader resolves on memstore/fsstore only because
+	// their index key is the same string, and matches nothing on the database
+	// backends or under a query-shaped read grant.
+	ref, refOK := parseEntityRef(entityID)
+	if !isSafePathSegment(typeName) || !isSafeStateRefSegment(entityID) || !refOK {
 		writeV1Error(w, r, http.StatusBadRequest, "invalid_path",
 			"Invalid entity type or id", "")
 		return
@@ -86,17 +93,17 @@ func (h *commentsHandler) handleV1Comments(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	target := comments.Target{Type: typeName, ID: entityID}
+	addr := commentAddress{typeName: typeName, ref: ref}
 
 	switch {
 	case len(parts) == 3 && parts[2] == "resolve":
-		h.commentResolveCheck(w, r, target)
+		h.commentResolveCheck(w, r, addr)
 	case len(parts) == 2:
-		h.commentCollection(w, r, target)
+		h.commentCollection(w, r, addr)
 	case len(parts) == 3 && parts[2] != "":
-		h.commentItem(w, r, target, parts[2])
+		h.commentItem(w, r, addr, parts[2])
 	case len(parts) == 4 && parts[2] != "" && parts[3] == "accept":
-		h.commentAccept(w, r, target, parts[2])
+		h.commentAccept(w, r, addr, parts[2])
 	default:
 		writeV1Error(w, r, http.StatusBadRequest, "invalid_path",
 			"Path must be /_comments/{type}/{id}[/{commentID}]", "")
@@ -105,14 +112,14 @@ func (h *commentsHandler) handleV1Comments(w http.ResponseWriter, r *http.Reques
 
 // commentCollection handles the target-level routes.
 func (h *commentsHandler) commentCollection(
-	w http.ResponseWriter, r *http.Request, target comments.Target,
+	w http.ResponseWriter, r *http.Request, addr commentAddress,
 ) {
 	switch r.Method {
 	case http.MethodGet:
-		h.listComments(w, r, target)
+		h.listComments(w, r, addr)
 	case http.MethodPost:
 		if !h.refuseIfReadOnly(w, r) {
-			h.addComment(w, r, target)
+			h.addComment(w, r, addr)
 		}
 	case http.MethodOptions:
 		w.Header().Set("Allow", "GET, POST, OPTIONS")
@@ -125,16 +132,16 @@ func (h *commentsHandler) commentCollection(
 
 // commentItem handles the single-comment routes.
 func (h *commentsHandler) commentItem(
-	w http.ResponseWriter, r *http.Request, target comments.Target, commentID string,
+	w http.ResponseWriter, r *http.Request, addr commentAddress, commentID string,
 ) {
 	switch r.Method {
 	case http.MethodPatch:
 		if !h.refuseIfReadOnly(w, r) {
-			h.updateComment(w, r, target, commentID)
+			h.updateComment(w, r, addr, commentID)
 		}
 	case http.MethodDelete:
 		if !h.refuseIfReadOnly(w, r) {
-			h.deleteComment(w, r, target, commentID)
+			h.deleteComment(w, r, addr, commentID)
 		}
 	case http.MethodOptions:
 		w.Header().Set("Allow", "PATCH, DELETE, OPTIONS")
@@ -180,14 +187,14 @@ type resolveCheckResponse struct {
 // Gated exactly like a create: it reveals whether a string appears in the body,
 // which is a read of the body, so `comment:add` plus the target read verdict.
 func (h *commentsHandler) commentResolveCheck(
-	w http.ResponseWriter, r *http.Request, target comments.Target,
+	w http.ResponseWriter, r *http.Request, addr commentAddress,
 ) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		writeV1Error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed", "")
 		return
 	}
-	target, ent, ok := h.gateCommentTargetEntity(w, r, target)
+	target, ent, ok := h.gateCommentTarget(w, r, addr)
 	if !ok {
 		return
 	}
@@ -203,7 +210,7 @@ func (h *commentsHandler) commentResolveCheck(
 		return
 	}
 
-	text, err := h.buildTextAnchor(ent, req.Quote, req.Prefix, req.Suffix)
+	text, err := buildTextAnchor(ent, req.Quote, req.Prefix, req.Suffix)
 	if err != nil {
 		// A failure here is the ANSWER, not an error: the caller asked whether
 		// this selection works, and "no, because…" is a successful reply.
@@ -281,14 +288,14 @@ type commentWire struct {
 }
 
 func (h *commentsHandler) listComments(
-	w http.ResponseWriter, r *http.Request, target comments.Target,
+	w http.ResponseWriter, r *http.Request, addr commentAddress,
 ) {
 	ctx := r.Context()
 	auth := h.commentAuthorizer()
 
 	// Read floor first: a caller who cannot read the target — or a target that
 	// does not exist — gets the same 404, so comments never confirm existence.
-	target, ent, ok := h.gateCommentTargetEntity(w, r, target)
+	target, ent, ok := h.gateCommentTarget(w, r, addr)
 	if !ok {
 		return
 	}
@@ -358,11 +365,11 @@ type addCommentRequest struct {
 }
 
 func (h *commentsHandler) addComment(
-	w http.ResponseWriter, r *http.Request, target comments.Target,
+	w http.ResponseWriter, r *http.Request, addr commentAddress,
 ) {
 	ctx := r.Context()
 
-	target, ent, ok := h.gateCommentTargetEntity(w, r, target)
+	target, ent, ok := h.gateCommentTarget(w, r, addr)
 	if !ok {
 		return
 	}
@@ -384,7 +391,7 @@ func (h *commentsHandler) addComment(
 		Replacement: req.Anchor.Replacement,
 	}
 	if anchor.Kind == comments.AnchorText {
-		text, aerr := h.buildTextAnchor(ent, req.Anchor.Quote, req.Anchor.QuotePrefix, req.Anchor.QuoteSuffix)
+		text, aerr := buildTextAnchor(ent, req.Anchor.Quote, req.Anchor.QuotePrefix, req.Anchor.QuoteSuffix)
 		if aerr != nil {
 			writeV1Error(w, r, http.StatusBadRequest, "invalid_comment", aerr.Error(), "")
 			return
@@ -423,11 +430,11 @@ type updateCommentRequest struct {
 }
 
 func (h *commentsHandler) updateComment(
-	w http.ResponseWriter, r *http.Request, target comments.Target, commentID string,
+	w http.ResponseWriter, r *http.Request, addr commentAddress, commentID string,
 ) {
 	ctx := r.Context()
 
-	target, existing, ok := h.gateCommentMutation(w, r, target, commentID, mutationUpdate)
+	target, existing, ok := h.gateCommentMutation(w, r, addr, commentID, mutationUpdate)
 	if !ok {
 		return
 	}
@@ -455,9 +462,9 @@ func (h *commentsHandler) updateComment(
 }
 
 func (h *commentsHandler) deleteComment(
-	w http.ResponseWriter, r *http.Request, target comments.Target, commentID string,
+	w http.ResponseWriter, r *http.Request, addr commentAddress, commentID string,
 ) {
-	target, _, ok := h.gateCommentMutation(w, r, target, commentID, mutationDelete)
+	target, _, ok := h.gateCommentMutation(w, r, addr, commentID, mutationDelete)
 	if !ok {
 		return
 	}
@@ -485,11 +492,11 @@ const (
 // this point the caller has proven it can read the target.
 func (h *commentsHandler) gateCommentMutation(
 	w http.ResponseWriter, r *http.Request,
-	target comments.Target, commentID string, kind mutationKind,
+	addr commentAddress, commentID string, kind mutationKind,
 ) (comments.Target, comments.Comment, bool) {
 	ctx := r.Context()
 
-	target, ok := h.gateCommentTarget(w, r, target)
+	target, _, ok := h.gateCommentTarget(w, r, addr)
 	if !ok {
 		return target, comments.Comment{}, false
 	}
@@ -521,6 +528,13 @@ func (h *commentsHandler) gateCommentMutation(
 	return target, existing, true
 }
 
+// commentAddress is the parsed target of a comments request: the entity type
+// and its address, face included.
+type commentAddress struct {
+	typeName string
+	ref      entityRef
+}
+
 // gateCommentTarget resolves the target entity, reporting whether the request
 // may proceed.
 //
@@ -530,19 +544,16 @@ func (h *commentsHandler) gateCommentMutation(
 // so gating on the verdict alone would let a comment route confirm that an
 // arbitrary id is absent, and (worse) accept comments filed against entities
 // that were never there.
+//
+// The resolved entity is returned so the anchor code reads the SAME row the
+// gate admitted. Re-reading it by id would lose the face: the thread is keyed
+// by (id, face), and a bare-id read returns whichever face the world selects,
+// which is how a draft comment came to be anchored in the published body.
 func (h *commentsHandler) gateCommentTarget(
-	w http.ResponseWriter, r *http.Request, target comments.Target,
-) (comments.Target, bool) {
-	target, _, ok := h.gateCommentTargetEntity(w, r, target)
-	return target, ok
-}
-
-// gateCommentTargetEntity is [commentsHandler.gateCommentTarget] that also
-// returns the visible entity it resolved, for a caller that needs its body.
-func (h *commentsHandler) gateCommentTargetEntity(
-	w http.ResponseWriter, r *http.Request, target comments.Target,
+	w http.ResponseWriter, r *http.Request, addr commentAddress,
 ) (comments.Target, *entity.Entity, bool) {
-	ent, found, err := h.visibleReader.getVisible(r.Context(), target.Type, target.ID)
+	target := comments.Target{Type: addr.typeName, ID: addr.ref.ID, Face: addr.ref.Face}
+	ent, found, err := h.visibleReader.getVisibleRef(r.Context(), addr.typeName, addr.ref)
 	if err != nil {
 		writeGateError(w, r, err)
 		return target, nil, false
@@ -552,10 +563,9 @@ func (h *commentsHandler) gateCommentTargetEntity(
 		return target, nil, false
 	}
 	// Scope the thread to the face this request actually resolved to
-	// (FEAT-9CD2MX). Taken from the RESOLVED entity rather than parsed from the
-	// URL: a bare id under a world resolves to whichever face that world
-	// selects, and the thread must match the content on screen. Returning it
-	// from the gate means no call site can forget to apply it.
+	// (FEAT-9CD2MX). Taken from the RESOLVED entity rather than the address:
+	// a bare id under a world resolves to whichever face that world selects,
+	// and the thread must match the content on screen.
 	target.ID = ent.ID
 	target.Face = ent.Face
 	return target, ent, true
@@ -777,7 +787,7 @@ type acceptResponse struct {
 // carries the raw row's version, so a body write landing after the reads
 // fails the patch instead of being overwritten.
 func (h *commentsHandler) commentAccept(
-	w http.ResponseWriter, r *http.Request, target comments.Target, commentID string,
+	w http.ResponseWriter, r *http.Request, addr commentAddress, commentID string,
 ) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -790,7 +800,7 @@ func (h *commentsHandler) commentAccept(
 	r = h.withProvision(r)
 	ctx := r.Context()
 
-	target, visible, ok := h.gateCommentTargetEntity(w, r, target)
+	target, visible, ok := h.gateCommentTarget(w, r, addr)
 	if !ok {
 		return
 	}

@@ -106,9 +106,10 @@ func (s *ScriptReader) bind(ctx context.Context) context.Context {
 // GetEntity loads by ID and gates on the STORED type. A denied entity is
 // reported as [store.ErrNotFound] — indistinguishable from a genuine miss,
 // preserving the oracle-free contract the rest of the package keeps.
-func (s *ScriptReader) GetEntity(ctx context.Context, id string) (*entity.Entity, error) {
+func (s *ScriptReader) GetEntity(ctx context.Context, addr string) (*entity.Entity, error) {
 	ctx = s.bind(ctx)
-	e, err := s.raw.GetEntity(ctx, id)
+	id, face := parseAddress(addr)
+	e, err := s.raw.GetEntityState(ctx, id, face)
 	if err != nil {
 		return nil, err
 	}

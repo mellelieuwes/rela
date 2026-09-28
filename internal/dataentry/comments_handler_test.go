@@ -609,3 +609,147 @@ func TestComments_PerFaceThreads(t *testing.T) {
 	require.Len(t, onDraft.Comments, 1)
 	require.Equal(t, "on the draft face", onDraft.Comments[0].Body)
 }
+
+// seedDraftTicket adds a draft face to the commentsApp fixture's TKT-001 whose
+// body shares no wording with the default face's, so a text anchor can only
+// resolve against the face it was made on.
+func seedDraftTicket(t *testing.T, app *App) {
+	t.Helper()
+	require.NoError(t, app.store.CreateEntity(t.Context(), &entity.Entity{
+		ID:         "TKT-001",
+		Type:       "ticket",
+		Face:       "draft",
+		Properties: map[string]any{"title": "Test Ticket", "status": "open"},
+		Content:    draftBody,
+	}))
+}
+
+// draftBody is the draft face's markdown.
+const draftBody = "A draft paragraph about migrating the bleve index to postgres full-text search.\n"
+
+// doCommentsAs runs a comments request as user under a declarative policy,
+// with the request-scoped ACL state the production middleware attaches.
+func doCommentsAs(
+	t *testing.T, app *App, d *acl.Declarative, method, path, body, user string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(method, path, http.NoBody)
+	} else {
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+	}
+	req = req.WithContext(gateCtxFor(principalCtx(user), t, d))
+	rec := httptest.NewRecorder()
+	app.comments.handleV1Comments(rec, req)
+	return rec
+}
+
+// TestComments_FacedThreadUnderRelationConferredGrant pins BUG-R1PQY9 for a
+// query-shaped read grant.
+//
+// The handler used to hand the row gate `TKT-001@draft` whole. A grant
+// conferred by a relation composes a query keyed on the bare id, so the
+// suffixed string matched nothing and every faced thread 404'd on every
+// backend, while the bare face of the same entity worked.
+func TestComments_FacedThreadUnderRelationConferredGrant(t *testing.T) {
+	app := commentsApp(t)
+	seedDraftTicket(t, app)
+	_, err := app.store.CreateRelation(t.Context(), "alice", "owned-by", "TKT-001", nil)
+	require.NoError(t, err)
+
+	const draftPath = "/api/v1/_comments/ticket/TKT-001@draft"
+	const note = `{"anchor":{"kind":"property","ref":"status"},"body":"on the draft"}`
+
+	t.Run("a conferred grant reaches the draft thread", func(t *testing.T) {
+		d := mustNewACL(t, &acl.Policy{
+			Roles: map[string]acl.RoleDef{"viewer": {
+				Read:        []string{"ticket"},
+				Permissions: []string{"comment:read", "comment:add"},
+			}},
+			RoleRelations: map[string]acl.RoleRelationDef{"owned-by": {Confers: "viewer"}},
+		}, app.store)
+		app.acl = d
+
+		rec := doCommentsAs(t, app, d, http.MethodPost, draftPath, note, "alice")
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		rec = doCommentsAs(t, app, d, http.MethodGet, draftPath, "", "alice")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got commentListResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		require.Len(t, got.Comments, 1)
+		require.Equal(t, "on the draft", got.Comments[0].Body)
+	})
+
+	t.Run("a grant without the draft face still 404s it", func(t *testing.T) {
+		// The negative control: parsing the address must not bypass the face
+		// gate. A global assignment passes the row gate, so the face gate is
+		// the only thing standing between alice and the draft thread.
+		d := mustNewACL(t, &acl.Policy{
+			Roles: map[string]acl.RoleDef{"viewer": {
+				Read:        []string{"ticket@published"},
+				Permissions: []string{"comment:read"},
+			}},
+			Assignments: map[string]string{"alice": "viewer"},
+		}, app.store)
+		app.acl = d
+
+		rec := doCommentsAs(t, app, d, http.MethodGet, draftPath, "", "alice")
+		require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+}
+
+// TestComments_TextAnchorResolvesAgainstItsFace pins BUG-R1PQY9's anchor half.
+//
+// The gate resolved the draft face, but the anchor code re-read the entity by
+// its bare id and got the DEFAULT face's body: a quote selected on the draft
+// was refused as "not found", and a stored draft anchor was resolved against
+// text it was never about.
+func TestComments_TextAnchorResolvesAgainstItsFace(t *testing.T) {
+	const draftPath = "/api/v1/_comments/ticket/TKT-001@draft"
+	const draftQuote = "migrating the bleve index to postgres"
+
+	t.Run("a quote from the draft body anchors on the draft", func(t *testing.T) {
+		app := commentsApp(t)
+		seedDraftTicket(t, app)
+
+		body := `{"anchor":{"kind":"text","quote":"` + draftQuote + `"},"body":"which release?"}`
+		rec := doComments(t, app, http.MethodPost, draftPath, body, "alice@example.com")
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		rec = doComments(t, app, http.MethodGet, draftPath, "", "alice@example.com")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got commentListResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		require.Len(t, got.Comments, 1)
+		anchor := got.Comments[0].Anchor
+		require.False(t, got.Comments[0].Detached)
+		require.NotNil(t, anchor.Start)
+		require.NotNil(t, anchor.End)
+		// The range must locate the quote in the DRAFT body; resolved against
+		// the default face it would be detached or point elsewhere.
+		require.Equal(t, draftQuote, draftBody[*anchor.Start:*anchor.End])
+	})
+
+	t.Run("a quote only in the default body is refused on the draft", func(t *testing.T) {
+		app := commentsApp(t)
+		seedDraftTicket(t, app)
+
+		body := `{"anchor":{"kind":"text","quote":"the old id in the search index"},"body":"x"}`
+		rec := doComments(t, app, http.MethodPost, draftPath, body, "alice@example.com")
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	})
+
+	t.Run("the resolve preflight checks the draft body", func(t *testing.T) {
+		app := commentsApp(t)
+		seedDraftTicket(t, app)
+
+		rec := doComments(t, app, http.MethodPost, draftPath+"/resolve",
+			`{"quote":"`+draftQuote+`"}`, "alice@example.com")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got resolveCheckResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		require.True(t, got.Anchorable, got.Reason)
+	})
+}

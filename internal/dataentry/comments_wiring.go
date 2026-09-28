@@ -243,12 +243,10 @@ func (h *commentsHandler) liveAnchors(target comments.Target, ent *entity.Entity
 // quote resolves to the first occurrence, which is how a comment on "Geordend"
 // ended up highlighting "Ongeordend".
 //
-// ent is the entity the target gate resolved through the visibility wrapper,
-// so a principal can only anchor to text it may already read, on the face the
-// thread belongs to (see liveAnchors for why it is not re-read).
-func (h *commentsHandler) buildTextAnchor(
-	ent *entity.Entity, quote, prefix, suffix string,
-) (*comments.TextAnchor, error) {
+// ent is the row the request gate resolved through the visibility wrapper, so
+// a principal can only anchor to text it may already read, and only within the
+// face the thread belongs to.
+func buildTextAnchor(ent *entity.Entity, quote, prefix, suffix string) (*comments.TextAnchor, error) {
 	quote = strings.TrimSpace(quote)
 	if len([]rune(quote)) < comments.MinQuoteRunes {
 		return nil, fmt.Errorf("selected text must be at least %d characters", comments.MinQuoteRunes)

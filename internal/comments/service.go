@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 )
 
@@ -183,6 +184,15 @@ func (s *Service) EntityDeleted(ctx context.Context, entityID string) error {
 	// All faces: the entity is gone, so a thread left on any face would be
 	// stranded at an id nothing can reach.
 	return s.store.DeleteAllFaces(ctx, entityID)
+}
+
+// EntityFaceDeleted drops the thread of one deleted face, leaving the entity's
+// other faces untouched.
+//
+// Dropped for the reason EntityDeleted gives: a face of the same name created
+// later would otherwise inherit remarks about content that no longer exists.
+func (s *Service) EntityFaceDeleted(ctx context.Context, entityID string, face entity.Face) error {
+	return s.store.DeleteTarget(ctx, Target{ID: entityID, Face: face})
 }
 
 // authorFrom resolves the comment author from ctx.

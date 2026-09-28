@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 
+	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
 )
 
@@ -100,6 +101,18 @@ func (f *aliasFanout) EntityDeleted(ctx context.Context, entityID string) error 
 	var errs []error
 	for _, s := range f.subscribers {
 		if err := s.EntityDeleted(ctx, entityID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// EntityFaceDeleted notifies every subscriber that one face of an entity left
+// the graph.
+func (f *aliasFanout) EntityFaceDeleted(ctx context.Context, entityID string, face entity.Face) error {
+	var errs []error
+	for _, s := range f.subscribers {
+		if err := s.EntityFaceDeleted(ctx, entityID, face); err != nil {
 			errs = append(errs, err)
 		}
 	}

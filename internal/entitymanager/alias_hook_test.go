@@ -7,9 +7,12 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/acl"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
+	"github.com/Sourcehaven-BV/rela/internal/comments"
+	"github.com/Sourcehaven-BV/rela/internal/comments/memcomments"
 	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
+	"github.com/Sourcehaven-BV/rela/internal/principal"
 	"github.com/Sourcehaven-BV/rela/internal/statemachine"
 	"github.com/Sourcehaven-BV/rela/internal/store/memstore"
 )
@@ -17,10 +20,12 @@ import (
 // recordingRewriter captures the hook calls so a test can assert the
 // entitymanager reported old→new, which is the one moment that link is knowable.
 type recordingRewriter struct {
-	renames   [][2]string
-	deletes   []string
-	renameErr error
-	deleteErr error
+	renames [][2]string
+	deletes []string
+	// faceDeletes records `id@face` per face-delete notification.
+	faceDeletes []string
+	renameErr   error
+	deleteErr   error
 }
 
 func (r *recordingRewriter) EntityRenamed(_ context.Context, oldID, newID string) error {
@@ -30,6 +35,11 @@ func (r *recordingRewriter) EntityRenamed(_ context.Context, oldID, newID string
 
 func (r *recordingRewriter) EntityDeleted(_ context.Context, id string) error {
 	r.deletes = append(r.deletes, id)
+	return r.deleteErr
+}
+
+func (r *recordingRewriter) EntityFaceDeleted(_ context.Context, id string, face entity.Face) error {
+	r.faceDeletes = append(r.faceDeletes, entity.FormatStateRef(id, face))
 	return r.deleteErr
 }
 
@@ -114,6 +124,70 @@ func TestAliasHook_FiresOnDelete(t *testing.T) {
 	}
 	if len(rw.deletes) != 1 || rw.deletes[0] != "TSK-gone" {
 		t.Errorf("delete hook received %v, want [TSK-gone]", rw.deletes)
+	}
+}
+
+// TestAliasHook_FiresOnFaceDelete pins BUG-R1PQY9: a face delete fired no
+// hook, so a subscriber keyed per face (comment threads) kept the deleted
+// face's data, and a face of the same name created later inherited it. The
+// entity survives, so EntityDeleted would be wrong: it would drop the sibling
+// faces' data too.
+func TestAliasHook_FiresOnFaceDelete(t *testing.T) {
+	rw := &recordingRewriter{}
+	mgr, st := aliasHookManager(t, rw)
+	seedTask(t, st, "TSK-1", map[string]any{"title": "a task"}, "")
+	if err := st.CreateEntity(t.Context(), &entity.Entity{
+		ID: "TSK-1", Type: "task", Face: "draft", Properties: map[string]any{"title": "draft"},
+	}); err != nil {
+		t.Fatalf("seed draft face: %v", err)
+	}
+
+	if _, err := mgr.DeleteEntityFace(t.Context(), "TSK-1", "draft"); err != nil {
+		t.Fatalf("DeleteEntityFace: %v", err)
+	}
+	if len(rw.faceDeletes) != 1 || rw.faceDeletes[0] != "TSK-1@draft" {
+		t.Errorf("face-delete hook received %v, want [TSK-1@draft]", rw.faceDeletes)
+	}
+	if len(rw.deletes) != 0 {
+		t.Errorf("a face delete fired the entity-delete hook: %v", rw.deletes)
+	}
+}
+
+// TestFaceDelete_DropsTheRealCommentThread drives the face delete into a real
+// comments.Service rather than a recorder, so the id and face the Manager
+// passes are checked against the key the comment store actually files under.
+func TestFaceDelete_DropsTheRealCommentThread(t *testing.T) {
+	svc, err := comments.NewService(memcomments.New(), nil)
+	if err != nil {
+		t.Fatalf("comments.NewService: %v", err)
+	}
+	mgr, st := aliasHookManager(t, svc)
+	seedTask(t, st, "TSK-1", map[string]any{"title": "a task"}, "")
+	if err := st.CreateEntity(t.Context(), &entity.Entity{
+		ID: "TSK-1", Type: "task", Face: "draft", Properties: map[string]any{"title": "draft"},
+	}); err != nil {
+		t.Fatalf("seed draft face: %v", err)
+	}
+	ctx := principal.With(t.Context(), principal.Principal{User: "alice", Tool: "test"})
+	for _, face := range []entity.Face{"", "draft"} {
+		if _, err := svc.Add(ctx, comments.Target{Type: "task", ID: "TSK-1", Face: face},
+			comments.AddRequest{Anchor: comments.Anchor{Kind: comments.AnchorProperty, Ref: "title"}, Body: "x"}); err != nil {
+			t.Fatalf("seed comment on %q: %v", face, err)
+		}
+	}
+
+	if _, err := mgr.DeleteEntityFace(ctx, "TSK-1", "draft"); err != nil {
+		t.Fatalf("DeleteEntityFace: %v", err)
+	}
+
+	for face, want := range map[entity.Face]int{"draft": 0, "": 1} {
+		got, err := svc.List(ctx, comments.Target{Type: "task", ID: "TSK-1", Face: face})
+		if err != nil {
+			t.Fatalf("List %q: %v", face, err)
+		}
+		if len(got) != want {
+			t.Errorf("face %q has %d comments after the draft delete, want %d", face, len(got), want)
+		}
 	}
 }
 

@@ -1686,6 +1686,7 @@ func (m *Manager) DeleteEntityFace(
 	// Version capture, audit and relation attribution after commit, exactly
 	// as DeleteEntity orders them and for the same reasons.
 	m.recordEntityVersion(ctx, store.VersionOpDelete, current, "")
+	notifyAliasesOfFaceDelete(ctx, m.deps.AliasRewriter, id, face)
 	ref := entity.FormatStateRef(id, face)
 	cascadeCtx := ctx
 	if len(res.DeletedRelations) > 0 {

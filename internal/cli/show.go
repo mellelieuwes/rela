@@ -17,20 +17,26 @@ type ShowCmd struct {
 func (c *ShowCmd) Run(ctx context.Context, svc *readServices) error {
 	st := svc.Store
 
-	e, err := st.GetEntity(ctx, c.ID)
+	e, err := store.GetEntityAt(ctx, st, c.ID)
 	if err != nil {
 		return classifyReadError(c.ID, err)
 	}
 
+	// Relations are keyed on the bare id, so query by the row that was read,
+	// not by the address the user typed.
 	var incoming, outgoing []*entity.Relation
-	inQ := store.RelationQuery{EntityID: c.ID, Direction: store.DirectionIncoming}
+	inQ := store.RelationQuery{EntityID: e.ID, Direction: store.DirectionIncoming}
 	for r, err := range st.ListRelations(ctx, inQ) {
 		if err != nil { // coverage-ignore: defensive: memstore.ListRelations iterator never yields a non-nil error
 			break
 		}
 		incoming = append(incoming, r)
 	}
-	outQ := store.RelationQuery{EntityID: c.ID, Direction: store.DirectionOutgoing}
+	outQ := store.RelationQuery{EntityID: e.ID, Direction: store.DirectionOutgoing}
+	if !e.Face.IsDefault() {
+		// An outgoing edge is tailed at one face; show that face's own.
+		outQ.FromFace = &e.Face
+	}
 	for r, err := range st.ListRelations(ctx, outQ) {
 		if err != nil { // coverage-ignore: defensive: memstore.ListRelations iterator never yields a non-nil error
 			break

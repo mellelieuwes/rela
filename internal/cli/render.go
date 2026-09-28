@@ -32,7 +32,7 @@ func (c *RenderCmd) Run(ctx context.Context, svc *readServices) error {
 			c.Transform, transformNames(reg))
 	}
 
-	e, err := svc.Store.GetEntity(ctx, c.ID)
+	e, err := store.GetEntityAt(ctx, svc.Store, c.ID)
 	if err != nil {
 		return fmt.Errorf("entity %q: %w", c.ID, err)
 	}

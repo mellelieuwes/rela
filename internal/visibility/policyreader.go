@@ -40,7 +40,8 @@ func NewPolicyReader(gate RowGate, redact FieldRedactor, get EntityGetter) (*Pol
 // Get implements [Reader]. Gate BEFORE load (hidden == missing, RR-NGMI),
 // then verify the stored type matches the caller's claim (RR-SRZK6X),
 // then redact a copy.
-func (r *PolicyReader) Get(ctx context.Context, entityType, id string) (*entity.Entity, bool, error) {
+func (r *PolicyReader) Get(ctx context.Context, entityType, addr string) (*entity.Entity, bool, error) {
+	id, face := parseAddress(addr)
 	ok, err := r.gate.PermitsRead(ctx, entityType, id)
 	if err != nil {
 		return nil, false, err
@@ -48,7 +49,7 @@ func (r *PolicyReader) Get(ctx context.Context, entityType, id string) (*entity.
 	if !ok {
 		return nil, false, nil
 	}
-	e, gerr := r.get.GetEntity(ctx, id)
+	e, gerr := r.get.GetEntityState(ctx, id, face)
 	if gerr != nil {
 		// Store miss == not-found; indistinguishable from a deny by design.
 		return nil, false, nil //nolint:nilerr // store miss == not-found, by design
@@ -157,7 +158,7 @@ func (r *PolicyReader) FilterRelations(ctx context.Context, rels []*entity.Relat
 				continue
 			}
 			seen[id] = true
-			e, err := r.get.GetEntity(ctx, id)
+			e, err := r.get.GetEntityState(ctx, id, "")
 			if err != nil {
 				continue // missing endpoint: stays out of allowed → relation hidden
 			}

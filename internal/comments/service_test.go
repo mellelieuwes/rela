@@ -11,6 +11,7 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/comments"
 	"github.com/Sourcehaven-BV/rela/internal/comments/memcomments"
+	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 )
 
@@ -336,4 +337,30 @@ func TestEntityDeleted_DropsComments(t *testing.T) {
 	got, err := st.List(ctx, comments.Target{ID: "TKT-1"})
 	require.NoError(t, err)
 	require.Empty(t, got)
+}
+
+// TestEntityFaceDeleted_DropsOnlyThatFace pins BUG-R1PQY9's delete half: a face
+// delete used to fire no notification, so the face's thread outlived it and a
+// face of the same name created later inherited it. The sibling faces'
+// threads must survive, because their content still exists.
+func TestEntityFaceDeleted_DropsOnlyThatFace(t *testing.T) {
+	svc, st := newService(t)
+	ctx := aliceCtx()
+
+	for _, face := range []entity.Face{"", "draft", "published"} {
+		_, err := svc.Add(ctx, comments.Target{Type: "ticket", ID: "TKT-1", Face: face},
+			comments.AddRequest{Anchor: propAnchor(), Body: "on " + string(face)})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, svc.EntityFaceDeleted(ctx, "TKT-1", "draft"))
+
+	gone, err := st.List(ctx, comments.Target{ID: "TKT-1", Face: "draft"})
+	require.NoError(t, err)
+	require.Empty(t, gone)
+	for _, face := range []entity.Face{"", "published"} {
+		kept, err := st.List(ctx, comments.Target{ID: "TKT-1", Face: face})
+		require.NoError(t, err)
+		require.Len(t, kept, 1, "face %q keeps its thread", face)
+	}
 }

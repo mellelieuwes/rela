@@ -195,6 +195,6 @@ func TestPushdownBranch_MarksRedacted(t *testing.T) {
 // used through RedactRow (which performs no load).
 type stubGetter struct{}
 
-func (stubGetter) GetEntity(context.Context, string) (*entity.Entity, error) {
+func (stubGetter) GetEntityState(context.Context, string, entity.Face) (*entity.Entity, error) {
 	return nil, errors.New("not used")
 }

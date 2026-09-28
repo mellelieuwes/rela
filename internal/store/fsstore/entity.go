@@ -24,6 +24,9 @@ func (s *FSStore) GetEntity(ctx context.Context, id string) (*entity.Entity, err
 }
 
 func (s *FSStore) GetEntityState(_ context.Context, id string, p entity.Face) (*entity.Entity, error) {
+	if storeutil.IsStateRef(id) {
+		return nil, store.ErrNotFound
+	}
 	key := stateKey(id, p)
 	s.mu.RLock()
 	meta, ok := s.entities[key]

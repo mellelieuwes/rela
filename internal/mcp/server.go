@@ -105,6 +105,9 @@ type Deps struct {
 type GraphReader interface {
 	GraphCounter
 
+	// GetEntity takes an entity ADDRESS (`ID` or `ID@face`), as tool input
+	// may name a face. The visibility readers the wiring supplies parse it; a
+	// raw store.Store would take a bare id only.
 	GetEntity(ctx context.Context, id string) (*entity.Entity, error)
 	ListEntities(ctx context.Context, q store.EntityQuery) iter.Seq2[*entity.Entity, error]
 	GetRelation(ctx context.Context, from, relType, to string) (*entity.Relation, error)

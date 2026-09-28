@@ -235,6 +235,9 @@ type EntityReader interface {
 	//
 	// With content states (TKT-DOFYR1) the bare id addresses the DEFAULT
 	// state; GetEntity(id) ≡ GetEntityState(id, zero Face).
+	//
+	// id is a BARE id. A serialized address (`ID@face`) is ErrNotFound on
+	// every backend; parse it first, or use [GetEntityAt] (BUG-R1PQY9).
 	GetEntity(ctx context.Context, id string) (*entity.Entity, error)
 
 	// GetEntityState returns the entity's content state addressed by
@@ -1654,4 +1657,27 @@ type TypeResolver interface {
 type EntityTypeSchema struct {
 	Plural        string
 	PropertyOrder []string
+}
+
+// StateGetter is the single-row load [GetEntityAt] needs.
+type StateGetter interface {
+	GetEntityState(ctx context.Context, id string, p entity.Face) (*entity.Entity, error)
+}
+
+// GetEntityAt loads the row an entity ADDRESS names: a bare id, or `ID@face`.
+//
+// For entry points that take an address from a user (CLI arguments, MCP tool
+// input). [EntityReader.GetEntity] takes a bare id only, so handing it an
+// address finds nothing.
+//
+// A string the address grammar rejects is looked up literally at the default
+// face, as entitymanager's getEntityByRef does: a hand-edited file may carry an
+// id the current grammar would refuse, and it must stay readable. A string
+// that still contains the separator is ErrNotFound from every backend.
+func GetEntityAt(ctx context.Context, r StateGetter, addr string) (*entity.Entity, error) {
+	id, face, err := entity.ParseStateRef(addr)
+	if err != nil {
+		return r.GetEntityState(ctx, addr, "")
+	}
+	return r.GetEntityState(ctx, id, face)
 }

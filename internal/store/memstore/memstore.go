@@ -285,6 +285,9 @@ func (m *MemStore) GetEntity(ctx context.Context, id string) (*entity.Entity, er
 }
 
 func (m *MemStore) GetEntityState(_ context.Context, id string, p entity.Face) (*entity.Entity, error) {
+	if storeutil.IsStateRef(id) {
+		return nil, store.ErrNotFound
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

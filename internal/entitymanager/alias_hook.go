@@ -3,6 +3,8 @@ package entitymanager
 import (
 	"context"
 	"log/slog"
+
+	"github.com/Sourcehaven-BV/rela/internal/entity"
 )
 
 // AliasRewriter is notified when an entity's identity changes, so a subsystem
@@ -42,6 +44,15 @@ type AliasRewriter interface {
 	// refused instead of silently resurrecting it. Dropping the reference
 	// would destroy that evidence and the next write would read as a create.
 	EntityDeleted(ctx context.Context, entityID string) error
+	// EntityFaceDeleted NOTIFIES that one non-default face of an entity was
+	// deleted while the entity itself remains.
+	//
+	// Separate from EntityDeleted because the scope differs: a subscriber
+	// keyed per face (comments) must drop only that face's references, and
+	// one keyed per entity (CalDAV) has nothing to do. Without it a face's
+	// references outlive the face and resurface when a face of that name is
+	// created again (BUG-R1PQY9).
+	EntityFaceDeleted(ctx context.Context, entityID string, face entity.Face) error
 }
 
 // rewriteAliasesForRename notifies the alias rewriter of a completed rename.
@@ -70,5 +81,20 @@ func (m *Manager) notifyAliasesOfDelete(ctx context.Context, id string) {
 	if err := m.deps.AliasRewriter.EntityDeleted(ctx, id); err != nil {
 		slog.Error("entitymanager: alias delete-notification failed",
 			"id", id, "error", err)
+	}
+}
+
+// notifyAliasesOfFaceDelete notifies rw of a completed face delete. No-op when
+// rw is nil; failures are logged, as for a whole-entity delete.
+//
+// A function rather than a Manager method only to keep Manager under its
+// method load line; it reads nothing else from the Manager.
+func notifyAliasesOfFaceDelete(ctx context.Context, rw AliasRewriter, id string, face entity.Face) {
+	if rw == nil {
+		return
+	}
+	if err := rw.EntityFaceDeleted(ctx, id, face); err != nil {
+		slog.Error("entitymanager: alias face-delete notification failed",
+			"id", id, "face", face, "error", err)
 	}
 }

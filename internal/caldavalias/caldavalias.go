@@ -39,6 +39,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/state"
 )
 
@@ -284,6 +285,12 @@ func (s *Service) EntityRenamed(ctx context.Context, oldID, newID string) error 
 // rather than a record written on deletion: nothing needs to observe the delete
 // for it to hold.
 func (s *Service) EntityDeleted(_ context.Context, _ string) error {
+	return nil
+}
+
+// EntityFaceDeleted is a no-op: an alias names an entity, not one of its faces,
+// and the entity survives a face delete.
+func (s *Service) EntityFaceDeleted(_ context.Context, _ string, _ entity.Face) error {
 	return nil
 }
 

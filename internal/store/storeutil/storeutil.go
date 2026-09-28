@@ -40,6 +40,22 @@ func ValidateID(id string) error {
 	return nil
 }
 
+// IsStateRef reports whether id is a serialized state reference (`ID@face`)
+// rather than a bare entity id.
+//
+// memstore and fsstore key their entity index on [entity.FormatStateRef], so
+// without this check a lookup by "TKT-1@draft" hits the draft row by
+// coincidence of the key, while pgstore and sqlitestore match the string
+// against the id column and find nothing. The coincidence hid four
+// unparsed-address bugs from memstore-only tests (BUG-R1PQY9). Refusing the
+// string in the entity getters makes every backend answer them the same: an
+// address must be parsed with [entity.ParseStateRef] before it reaches a
+// lookup. Other lookups keyed on the index (attachment existence checks) do
+// not apply it yet.
+func IsStateRef(id string) bool {
+	return strings.Contains(id, entity.StateRefSeparator)
+}
+
 // ValidateRelationType rejects relation types that would cause
 // relation-key collisions or storage hazards. The rules mirror
 // [ValidateID]: relation types are embedded in the same

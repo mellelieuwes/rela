@@ -72,9 +72,10 @@ func Unrestricted(st store.Store) *UnrestrictedReader {
 	return &UnrestrictedReader{st: st}
 }
 
-// GetEntity implements the script read surface: straight pass-through.
-func (r *UnrestrictedReader) GetEntity(ctx context.Context, id string) (*entity.Entity, error) {
-	return r.st.GetEntity(ctx, id)
+// GetEntity implements the script read surface: a pass-through that accepts
+// an address (`ID` or `ID@face`), as the gated [ScriptReader] does.
+func (r *UnrestrictedReader) GetEntity(ctx context.Context, addr string) (*entity.Entity, error) {
+	return store.GetEntityAt(ctx, r.st, addr)
 }
 
 // ListEntities implements the script read surface: straight pass-through.

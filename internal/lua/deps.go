@@ -24,6 +24,8 @@ import (
 // contain no ACL logic at all — they cannot forget to gate, because they
 // have nothing else to read through.
 type EntityReader interface {
+	// GetEntity takes an entity ADDRESS (`ID` or `ID@face`). Both visibility
+	// readers the wiring supplies parse it.
 	GetEntity(ctx context.Context, id string) (*entity.Entity, error)
 	ListEntities(ctx context.Context, q store.EntityQuery) iter.Seq2[*entity.Entity, error]
 	ListRelations(ctx context.Context, q store.RelationQuery) iter.Seq2[*entity.Relation, error]

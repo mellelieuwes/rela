@@ -175,7 +175,7 @@ func (t *VisibleTracer) FindPath(ctx context.Context, fromID, toID string) []tra
 // could flip a `when:` predicate open). Returns false — withhold the
 // path — when the entity cannot be loaded (fail-closed).
 func (t *VisibleTracer) redactStepTitle(ctx context.Context, s *tracer.PathStep) bool {
-	e, err := t.get.GetEntity(ctx, s.ID)
+	e, err := t.get.GetEntityState(ctx, s.ID, "")
 	if err != nil {
 		return false
 	}
@@ -243,7 +243,7 @@ func (t *VisibleTracer) typesOf(ctx context.Context, ids []string) map[string][]
 func (t *VisibleTracer) typesOfPerID(ctx context.Context, ids []string) map[string][]string {
 	byType := map[string][]string{}
 	for _, id := range ids {
-		e, gerr := t.get.GetEntity(ctx, id)
+		e, gerr := t.get.GetEntityState(ctx, id, "")
 		if gerr != nil {
 			continue
 		}
@@ -258,7 +258,7 @@ func (t *VisibleTracer) typesOfPerID(ctx context.Context, ids []string) map[stri
 // the start node. Note the documented residual: a VISIBLE start still
 // reports a cycle whose loop passes through hidden nodes.
 func (t *VisibleTracer) HasCycle(ctx context.Context, startID string) bool {
-	e, err := t.get.GetEntity(ctx, startID)
+	e, err := t.get.GetEntityState(ctx, startID, "")
 	if err != nil {
 		return false
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/comments"
 	"github.com/Sourcehaven-BV/rela/internal/comments/memcomments"
+	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
@@ -162,6 +163,11 @@ func (r *recordingRewriter) EntityDeleted(_ context.Context, id string) error {
 	return r.err
 }
 
+func (r *recordingRewriter) EntityFaceDeleted(_ context.Context, id string, face entity.Face) error {
+	r.deleted = append(r.deleted, entity.FormatStateRef(id, face))
+	return r.err
+}
+
 // TestAliasFanout_NilWhenNothingSubscribes pins that an unused hook stays nil,
 // so the Manager's nil fast path still applies.
 func TestAliasFanout_NilWhenNothingSubscribes(t *testing.T) {
@@ -239,11 +245,12 @@ func TestAliasFanout_NotifiesEverySubscriber(t *testing.T) {
 
 	require.NoError(t, fanout.EntityRenamed(ctx, "TKT-old", "TKT-new"))
 	require.NoError(t, fanout.EntityDeleted(ctx, "TKT-1"))
+	require.NoError(t, fanout.EntityFaceDeleted(ctx, "TKT-2", "draft"))
 
 	require.Equal(t, []string{"TKT-old->TKT-new"}, a.renamed)
 	require.Equal(t, []string{"TKT-old->TKT-new"}, b.renamed)
-	require.Equal(t, []string{"TKT-1"}, a.deleted)
-	require.Equal(t, []string{"TKT-1"}, b.deleted)
+	require.Equal(t, []string{"TKT-1", "TKT-2@draft"}, a.deleted)
+	require.Equal(t, []string{"TKT-1", "TKT-2@draft"}, b.deleted)
 }
 
 // TestAliasFanout_OneFailureDoesNotSkipOthers pins the join-don't-short-circuit

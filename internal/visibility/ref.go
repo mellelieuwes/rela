@@ -30,7 +30,7 @@ func Readable(ctx context.Context, r RefReader, ref string) bool {
 	}
 	q := store.EntityQuery{IDs: []string{ref}, AllStates: true}
 	if base, face, err := entity.ParseStateRef(ref); err == nil && !face.IsDefault() {
-		q = store.EntityQuery{IDs: []string{base}, FaceIn: []entity.Face{face}}
+		q = store.EntityQuery{IDs: []string{base}, FaceIn: []entity.Face{face}, AllStates: true}
 	}
 	for e, err := range r.ListEntities(ctx, q) {
 		if err == nil && e != nil && e.ID == q.IDs[0] {

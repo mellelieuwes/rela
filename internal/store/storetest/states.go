@@ -70,6 +70,32 @@ func RunStateTests(t *testing.T, f Factory) {
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
 
+	// An address string is not an id. memstore and fsstore key their index on
+	// entity.FormatStateRef, so before this was pinned they resolved
+	// "PAGE-1@draft" to the draft row while pgstore and sqlitestore matched it
+	// against the id column and found nothing. The memstore-only handler
+	// tests passed against every unparsed-address bug (BUG-R1PQY9 is the
+	// fourth); this makes every backend answer alike, so they fail instead.
+	t.Run("AddressStringIsNotAnID", func(t *testing.T) {
+		s := f(t)
+		mustCreate(t, s, newState(t, "PAGE-9", "page", "", "default face"))
+		mustCreate(t, s, newState(t, "PAGE-9", "page", "draft", "draft face"))
+
+		_, err := s.GetEntity(ctx(), "PAGE-9@draft")
+		assert.ErrorIs(t, err, store.ErrNotFound, "GetEntity takes a bare id")
+
+		_, err = s.GetEntityState(ctx(), "PAGE-9@draft", "")
+		assert.ErrorIs(t, err, store.ErrNotFound, "GetEntityState takes a bare id")
+
+		// The parsed address reaches the row, through the shared helper too.
+		got, err := store.GetEntityAt(ctx(), s, "PAGE-9@draft")
+		require.NoError(t, err)
+		assert.Equal(t, "draft face", got.GetString("title"))
+		got, err = store.GetEntityAt(ctx(), s, "PAGE-9")
+		require.NoError(t, err)
+		assert.Equal(t, "default face", got.GetString("title"))
+	})
+
 	t.Run("FaceIsOpaqueToTheStore", func(t *testing.T) {
 		// The store equality-matches face values, never inspects
 		// them: an unusual-but-canonical coordinate round-trips

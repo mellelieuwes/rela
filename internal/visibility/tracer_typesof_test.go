@@ -38,12 +38,20 @@ func (g getterOnly) GetEntity(ctx context.Context, id string) (*entity.Entity, e
 	return g.st.GetEntity(ctx, id)
 }
 
+func (g getterOnly) GetEntityState(ctx context.Context, id string, face entity.Face) (*entity.Entity, error) {
+	return g.st.GetEntityState(ctx, id, face)
+}
+
 // headerErrGetter satisfies store.EntityReader but fails its header scan,
 // exercising the fail-closed fallback inside the batched path.
 type headerErrGetter struct{ st store.Store }
 
 func (h headerErrGetter) GetEntity(ctx context.Context, id string) (*entity.Entity, error) {
 	return h.st.GetEntity(ctx, id)
+}
+
+func (h headerErrGetter) GetEntityState(ctx context.Context, id string, face entity.Face) (*entity.Entity, error) {
+	return h.st.GetEntityState(ctx, id, face)
 }
 
 func (h headerErrGetter) ListEntities(
@@ -171,6 +179,10 @@ type getterWithHeaders struct{ st store.Store }
 
 func (g getterWithHeaders) GetEntity(ctx context.Context, id string) (*entity.Entity, error) {
 	return g.st.GetEntity(ctx, id)
+}
+
+func (g getterWithHeaders) GetEntityState(ctx context.Context, id string, face entity.Face) (*entity.Entity, error) {
+	return g.st.GetEntityState(ctx, id, face)
 }
 
 func (g getterWithHeaders) ListEntities(
