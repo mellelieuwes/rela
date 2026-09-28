@@ -86,66 +86,93 @@ data, because every read goes to the store.
 
 ## Tools
 
+The tool set is kept small, because an MCP client may load the server into every
+session and each tool costs context for its name, description and schema.
+Related operations share one tool with a selector argument.
+
+Results are compact JSON. Entity summaries carry a `title` resolved from the
+type's `display_property`, so an agent can tell entities apart without
+fetching each one. A summary of a faced entity also carries its `face`.
+
 ### Entity Tools
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `list_entities` | List entities with optional filtering | `type?`, `where?`, `limit?`, `offset?` |
-| `show_entity` | Get full entity details with relations | `id` |
-| `search_entities` | Full-text search across entities. Each hit has `id`, `type`, `title`, `status`, and `face` for a faced entity | `query`, `type?`, `limit?` |
-| `create_entity` | Create a new entity | `type`, `properties`, `content?`, `id?` |
-| `update_entity` | Update entity properties or content | `id`, `properties?`, `content?` |
-| `delete_entity` | Delete an entity and its relations | `id`, `cascade?` |
+| `list_entities` | List entity summaries, sorted by ID | `type?`, `filter?`, `limit?` (default 50), `offset?` |
+| `show_entity` | Get one entity with its relations | `id`, `content?` (default true) |
+| `search_entities` | Full-text search across entities | `query`, `type?`, `limit?` (default 20) |
+| `create_entity` | Create an entity | `type`, `properties`, `content?`, `id?` |
+| `update_entity` | Update named properties or the body | `id`, `properties?`, `content?` |
+| `delete_entity` | Delete an entity | `id`, `cascade?` |
+| `rename_entity` | Change an entity's ID and its references | `id`, `new_id`, `dry_run?` |
 
-**Filtering with `where`:**
+`list_entities` answers `{"total":…,"has_more":…,"entities":[…]}`. An unknown
+type is an error rather than an empty list.
 
-The `list_entities` tool supports property filter expressions:
+**Filtering:** `filter` takes a predicate expression, the same language as the
+CLI's `rela list --filter`. It requires `type`.
 
 ```text
-status=accepted
-priority!=low
-status=draft,proposed
+entity.status == 'accepted'
+entity.status == 'open' and entity.priority ~= 'low'
 ```
+
+`related(...)` works too, and counts only the entities the caller may see:
+
+```text
+related(entity, 'implements', { status = 'open' })
+```
+
+In `update_entity`, a `null` property value removes the property, and an empty
+string is ignored.
 
 ### Relation Tools
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `list_relations` | List relations with optional filtering | `type?`, `from?`, `to?` |
-| `create_relation` | Create a relation between entities | `from`, `type`, `to`, `content?` |
+| `list_relations` | List relations | `type?`, `from?`, `to?`, `limit?` (default 50), `offset?` |
+| `create_relation` | Create a relation between entities | `from`, `type`, `to`, `content?`, `properties?` |
 | `delete_relation` | Delete a relation | `from`, `type`, `to` |
 
-### Graph Tracing Tools
+### Graph Tools
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `trace_from` | Trace all dependencies from an entity | `id`, `max_depth?` |
-| `trace_to` | Trace upstream dependencies to an entity | `id`, `max_depth?` |
-| `find_path` | Find shortest path between two entities | `from`, `to` |
+| `trace` | Walk the graph from an entity | `id`, `direction?` (`both` or `upstream`), `max_depth?` |
+| `find_path` | Find the shortest path between two entities | `from`, `to` |
 
-### Analysis Tools
+`direction: both` follows outgoing and incoming edges. `direction: upstream`
+follows incoming edges only.
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `analyze_orphans` | Find entities with no connections | `type?` |
-| `analyze_cardinality` | Check relation cardinality constraints | (none) |
-| `analyze_properties` | Validate entity properties against schema | (none) |
-| `analyze_validations` | Run custom validation rules | (none) |
-
-### Schema Tools
+### Analysis
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `get_metamodel` | Get the full metamodel definition | (none) |
-| `list_entity_types` | List entity types with property schemas | (none) |
-| `list_relation_types` | List relation types with constraints | (none) |
+| `analyze` | Check the graph against the schema | `check`, `type?`, `threshold?` |
 
-### Utility Tools
+`check` is one of `cardinality`, `properties`, `validations`, `unique`, `orphans`
+or `schema`. `type` applies to `orphans`, and `threshold` to `schema`. Findings
+come back as `{"check":…,"count":…,"results":…}`; a clean check answers with one
+sentence.
+
+### Schema
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `refresh` | Force re-sync the graph from disk | (none) |
-| `export` | Export entities/relations | `format` (json/yaml/csv), `type?` |
+| `schema` | Describe the schema | `type?` |
+
+Without `type`, `schema` returns one short record per entity and relation type.
+With an entity type it returns that type's properties (with enum values
+resolved), the relations it takes part in, and its validation rules. With a
+relation type it returns that relation's endpoints, cardinality and properties.
+The full raw metamodel is the `rela://metamodel` resource.
+
+### Lua Tools
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `lua_eval` | Run Lua code against the graph | `code` |
+| `lua_run` | Run a script from `scripts/`; without `path`, list the scripts | `path?`, `args?` |
 
 ### Attachment Tools
 

@@ -4,6 +4,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
 	"gopkg.in/yaml.v3"
@@ -13,51 +14,98 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/store"
 )
 
+// Values of the analyze tool's check argument.
+const (
+	checkCardinality = "cardinality"
+	checkProperties  = "properties"
+	checkValidations = "validations"
+	checkUnique      = "unique"
+	checkOrphans     = "orphans"
+	checkSchema      = "schema"
+)
+
+// analyzeChecks lists the checks in the order the tool schema presents them.
+var analyzeChecks = []string{
+	checkCardinality, checkProperties, checkValidations, checkUnique, checkOrphans, checkSchema,
+}
+
+// handleAnalyze serves the analyze tool by dispatching on its check argument.
+// The per-check handlers read their own optional arguments (type, threshold)
+// from the same request.
+func (s *Server) handleAnalyze(
+	ctx context.Context, request *mcpgo.CallToolRequest,
+) (*mcpgo.CallToolResult, error) {
+	check, err := newToolRequest(request).RequireString("check")
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+	handlers := map[string]func(context.Context, *mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error){
+		checkCardinality: s.handleAnalyzeCardinality,
+		checkProperties:  s.handleAnalyzeProperties,
+		checkValidations: s.handleAnalyzeValidations,
+		checkUnique:      s.handleAnalyzeUnique,
+		checkOrphans:     s.handleAnalyzeOrphans,
+		checkSchema:      s.handleAnalyzeSchema,
+	}
+	h, ok := handlers[check]
+	if !ok {
+		return errorResult(fmt.Sprintf("unknown check %q (use one of: %s)",
+			check, strings.Join(analyzeChecks, ", "))), nil
+	}
+	return h(ctx, request)
+}
+
+// findingsResult renders the findings of one analyze check. Every check that
+// finds something answers in this one shape, so a caller parses a single
+// format: {"check":…,"count":…,"results":…}. A clean check answers with a
+// one-line sentence instead.
+func findingsResult(check string, count int, results any) *mcpgo.CallToolResult {
+	text, err := marshalJSON(struct {
+		Check   string `json:"check"`
+		Count   int    `json:"count"`
+		Results any    `json:"results"`
+	}{check, count, results})
+	if err != nil { // coverage-ignore: defensive: every caller passes string/int DTOs; json.Marshal cannot fail.
+		return errorResult(err.Error())
+	}
+	return textResult(text)
+}
+
 func (s *Server) handleAnalyzeOrphans(
 	ctx context.Context, request *mcpgo.CallToolRequest,
 ) (*mcpgo.CallToolResult, error) {
+	snap := s.state.current()
 	args := newToolRequest(request)
 	entityType := args.GetString("type", "")
 
-	orphanIDs, _ := s.deps().Tracer.FindOrphans(ctx)
-
-	st := s.deps().Store
+	d := snap.deps
 	resolved := ""
 	if entityType != "" {
-		resolved = group(s, selTypes).resolveType(entityType)
+		r, _, err := snap.handlers.types.resolveEntityType(entityType)
+		if err != nil {
+			return errorResult(err.Error()), nil
+		}
+		resolved = r
 	}
 
-	type orphanInfo struct {
-		ID     string `json:"id"`
-		Type   string `json:"type"`
-		Title  string `json:"title,omitempty"`
-		Status string `json:"status,omitempty"`
-	}
-	orphans := make([]orphanInfo, 0)
+	orphanIDs, _ := d.Tracer.FindOrphans(ctx)
+
+	orphans := make([]entitySummary, 0)
 	for _, id := range orphanIDs {
-		e, err := st.GetEntity(ctx, id)
+		e, err := d.Store.GetEntity(ctx, id)
 		if err != nil {
 			continue
 		}
 		if resolved != "" && e.Type != resolved {
 			continue
 		}
-		orphans = append(orphans, orphanInfo{
-			ID: e.ID, Type: e.Type, Title: e.Title(), Status: e.Status(),
-		})
+		orphans = append(orphans, convertStoreEntitySummary(d.Meta, e))
 	}
 
 	if len(orphans) == 0 {
 		return textResult("No orphan entities found"), nil
 	}
-
-	text, err := marshalJSON(orphans)
-	if err != nil { // coverage-ignore: defensive: orphans is []orphanInfo of strings built from store entities;
-		// json.Marshal cannot fail.
-		return errorResult(err.Error()), nil
-	}
-	return textResult(
-		fmt.Sprintf("Found %d orphan entities:\n\n%s", len(orphans), text)), nil
+	return findingsResult(checkOrphans, len(orphans), orphans), nil
 }
 
 type cardinalityViolation struct {
@@ -109,10 +157,11 @@ type cardinalityViolation struct {
 func (s *Server) handleAnalyzeCardinality(
 	ctx context.Context, _ *mcpgo.CallToolRequest,
 ) (*mcpgo.CallToolResult, error) {
+	snap := s.state.current()
 	// One snapshot for the whole operation (CLAUDE.md "capture state once"):
 	// ReloadDeps republishes the bundle atomically on a schema.yaml edit, so
 	// two separate deps() loads could pair a new store with an old metamodel.
-	d := s.deps()
+	d := snap.deps
 	found, err := schema.CheckCardinality(ctx, d.Store, d.Meta, nil)
 	if err != nil {
 		return errorResult(err.Error()), nil
@@ -131,13 +180,7 @@ func (s *Server) handleAnalyzeCardinality(
 		return textResult("All cardinality constraints satisfied"), nil
 	}
 
-	text, err := marshalJSON(violations)
-	if err != nil { // coverage-ignore: defensive: violations is []cardinalityViolation of strings; json.Marshal cannot
-		// fail.
-		return errorResult(err.Error()), nil
-	}
-	return textResult(
-		fmt.Sprintf("Found %d cardinality violations:\n\n%s", len(violations), text)), nil
+	return findingsResult(checkCardinality, len(violations), violations), nil
 }
 
 type uniqueViolation struct {
@@ -155,15 +198,16 @@ type uniqueViolation struct {
 func (s *Server) handleAnalyzeUnique(
 	ctx context.Context, _ *mcpgo.CallToolRequest,
 ) (*mcpgo.CallToolResult, error) {
+	snap := s.state.current()
 	violations := make([]uniqueViolation, 0)
 
-	for typeName, def := range s.deps().Meta.Entities {
+	for typeName, def := range snap.deps.Meta.Entities {
 		for propName, pd := range def.PropertyDefs() {
 			if !pd.Unique || pd.List {
 				continue
 			}
 			byValue := map[string][]string{}
-			for e, err := range s.deps().Store.ListEntities(ctx, store.EntityQuery{Type: typeName}) {
+			for e, err := range snap.deps.Store.ListEntities(ctx, store.EntityQuery{Type: typeName}) {
 				if err != nil {
 					break
 				}
@@ -184,17 +228,13 @@ func (s *Server) handleAnalyzeUnique(
 	if len(violations) == 0 {
 		return textResult("No unique constraint violations found"), nil
 	}
-	text, err := marshalJSON(violations)
-	if err != nil { // coverage-ignore: defensive: violations is []uniqueViolation of strings; json.Marshal cannot fail.
-		return errorResult(err.Error()), nil
-	}
-	return textResult(
-		fmt.Sprintf("Found %d unique constraint violations:\n\n%s", len(violations), text)), nil
+	return findingsResult(checkUnique, len(violations), violations), nil
 }
 
 func (s *Server) handleAnalyzeProperties(
 	ctx context.Context, _ *mcpgo.CallToolRequest,
 ) (*mcpgo.CallToolResult, error) {
+	snap := s.state.current()
 	type entityErrors struct {
 		EntityID   string   `json:"entity_id"`
 		EntityType string   `json:"entity_type"`
@@ -207,8 +247,8 @@ func (s *Server) handleAnalyzeProperties(
 		Errors       []string `json:"errors"`
 	}
 
-	meta := s.deps().Meta
-	st := s.deps().Store
+	meta := snap.deps.Meta
+	st := snap.deps.Store
 	var allEntityErrors []entityErrors
 
 	// Validate entity properties
@@ -231,7 +271,7 @@ func (s *Server) handleAnalyzeProperties(
 	}
 
 	// Validate relation properties
-	relErrors := schema.ValidateRelationProperties(ctx, s.deps().Store, s.deps().Meta)
+	relErrors := schema.ValidateRelationProperties(ctx, snap.deps.Store, snap.deps.Meta)
 	allRelationErrors := make([]relationErrors, 0, len(relErrors))
 	for _, rpe := range relErrors {
 		errStrings := make([]string, len(rpe.Errors))
@@ -269,21 +309,14 @@ func (s *Server) handleAnalyzeProperties(
 		}
 	}
 
-	text, err := marshalJSON(result)
-	if err != nil { // coverage-ignore: defensive: result is a map of []entityErrors/[]relationErrors (strings);
-		// json.Marshal cannot fail.
-		return errorResult(err.Error()), nil
-	}
-
-	return textResult(
-		fmt.Sprintf("Found %d property errors across %d entities and %d relations:\n\n%s",
-			errorCount, totalEntityErrors, totalRelationErrors, text)), nil
+	return findingsResult(checkProperties, errorCount, result), nil
 }
 
 func (s *Server) handleAnalyzeValidations(
 	ctx context.Context, _ *mcpgo.CallToolRequest,
 ) (*mcpgo.CallToolResult, error) {
-	rules := s.deps().Meta.Validations
+	snap := s.state.current()
+	rules := snap.deps.Meta.Validations
 	if len(rules) == 0 {
 		return textResult("No custom validation rules defined in metamodel"), nil
 	}
@@ -306,7 +339,7 @@ func (s *Server) handleAnalyzeValidations(
 		Violations []ruleViolation `json:"violations"`
 	}
 
-	validator := s.deps().Validator
+	validator := snap.deps.Validator
 	var results []ruleResult
 	for _, rule := range rules {
 		full, err := validator.CheckRuleFull(ctx, rule)
@@ -335,47 +368,30 @@ func (s *Server) handleAnalyzeValidations(
 			fmt.Sprintf("All %d validation rules passed", len(rules))), nil
 	}
 
-	text, err := marshalJSON(results)
-	if err != nil { // coverage-ignore: defensive: results is []ruleResult of strings; json.Marshal cannot fail.
-		return errorResult(err.Error()), nil
+	count := 0
+	for _, r := range results {
+		count += len(r.Violations)
 	}
-	return textResult(
-		"Found validation issues:\n\n" + text), nil
+	return findingsResult(checkValidations, count, results), nil
 }
 
 func (s *Server) handleAnalyzeSchema(
 	ctx context.Context, request *mcpgo.CallToolRequest,
 ) (*mcpgo.CallToolResult, error) {
+	snap := s.state.current()
 	args := newToolRequest(request)
 	threshold := args.GetInt("threshold", 0)
 
 	dataEntry := s.loadDataEntryConfig(ctx)
 
-	counter := schema.NewStoreCounter(ctx, s.deps().Store)
-	analysis := schema.Analyze(s.deps().Meta, counter, dataEntry, threshold)
+	counter := schema.NewStoreCounter(ctx, snap.deps.Store)
+	analysis := schema.Analyze(snap.deps.Meta, counter, dataEntry, threshold)
 
 	if !analysis.HasIssues() {
 		return textResult("All schema types are in use"), nil
 	}
 
-	text, err := marshalJSON(analysis)
-	if err != nil { // coverage-ignore: defensive: analysis is a schema.Analysis of strings/ints; json.Marshal cannot
-		// fail.
-		return errorResult(err.Error()), nil
-	}
-
-	totalUnused := analysis.TotalUnused()
-	totalLowUsage := analysis.TotalLowUsage()
-
-	var message string
-	if totalLowUsage > 0 {
-		message = fmt.Sprintf("Found %d unused types and %d low-usage types:\n\n%s",
-			totalUnused, totalLowUsage, text)
-	} else {
-		message = fmt.Sprintf("Found %d unused types:\n\n%s", totalUnused, text)
-	}
-
-	return textResult(message), nil
+	return findingsResult(checkSchema, analysis.TotalUnused()+analysis.TotalLowUsage(), analysis), nil
 }
 
 // loadDataEntryConfig loads data-entry.yaml if it exists.

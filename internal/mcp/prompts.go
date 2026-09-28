@@ -89,7 +89,7 @@ func (h promptHandler) handleAnalyzeTraceabilityPrompt(
 		return nil, fmt.Errorf("entity not found: %s", id)
 	}
 
-	entityText, err := convertStoreEntity(ctx, e, st, true)
+	entityText, err := convertStoreEntity(ctx, e, st, h.meta, entityView{relations: true, content: true})
 	if err != nil {
 		return nil, err
 	}
@@ -100,12 +100,12 @@ func (h promptHandler) handleAnalyzeTraceabilityPrompt(
 
 	var traceFromText, traceToText string
 	if traceFrom != nil {
-		traceFromText, _ = convertTraceResult(traceFrom)
+		traceFromText, _ = convertTraceResult(traceFrom, h.meta)
 	} else {
 		traceFromText = "No downstream dependencies"
 	}
 	if traceTo != nil {
-		traceToText, _ = convertTraceResult(traceTo)
+		traceToText, _ = convertTraceResult(traceTo, h.meta)
 	} else {
 		traceToText = "No upstream dependencies"
 	}
@@ -168,7 +168,7 @@ func (h promptHandler) handleReviewOrphansPrompt(
 			continue
 		}
 		summaries = append(summaries, orphanSummary{
-			ID: e.ID, Type: e.Type, Title: e.Title(), Status: e.Status(),
+			ID: e.ID, Type: e.Type, Title: displayTitle(h.meta, e), Status: e.Status(),
 		})
 	}
 
@@ -307,7 +307,7 @@ func (h promptHandler) handleReviewEntityPrompt(
 		return nil, fmt.Errorf("entity not found: %s", id)
 	}
 
-	entityText, err := convertStoreEntity(ctx, entity, st, true)
+	entityText, err := convertStoreEntity(ctx, entity, st, h.meta, entityView{relations: true, content: true})
 	if err != nil {
 		return nil, err
 	}

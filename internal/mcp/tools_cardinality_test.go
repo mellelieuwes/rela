@@ -178,18 +178,17 @@ func TestHandleAnalyzeCardinality_IncomingUsesInverseLabel(t *testing.T) {
 	}
 	text := getResultText(t, result)
 
-	var violations []struct {
-		EntityID string `json:"entity_id"`
-		Relation string `json:"relation"`
-		Message  string `json:"message"`
+	var payload struct {
+		Results []struct {
+			EntityID string `json:"entity_id"`
+			Relation string `json:"relation"`
+			Message  string `json:"message"`
+		} `json:"results"`
 	}
-	start := strings.Index(text, "[")
-	if start < 0 {
-		t.Fatalf("no JSON payload in result: %s", text)
-	}
-	if err := json.Unmarshal([]byte(text[start:]), &violations); err != nil {
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
 		t.Fatalf("parse payload %q: %v", text, err)
 	}
+	violations := payload.Results
 	// REQ-002 and REQ-003 have no incoming `addresses` edge; REQ-001 does.
 	if len(violations) != 2 {
 		t.Fatalf("want 2 violations, got %d: %s", len(violations), text)

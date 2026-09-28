@@ -1211,7 +1211,8 @@ entities count depends on the surface:
 | `query_scopes:` | Those the reader may see |
 | View (list) `condition:` and next-action `condition:` | Those the reader may see |
 | Validation `when_condition:` / `then_condition:` in the web app and over MCP | Those the caller may see |
-| Validation in `rela validate` and `analyze_validations` | All |
+| MCP `list_entities` `filter` | Those the caller may see |
+| Validation in `rela validate` and `rela analyze validations` | All |
 | Automation `on.condition:` | All |
 | State-machine transition `when:` | All |
 | ACL `when:` in `acl.yaml` | All |
@@ -1284,11 +1285,11 @@ Scopes shape **screens**. They are deliberately absent everywhere that answers
 | Applies | Does not apply |
 | --- | --- |
 | Lists, kanbans, and list search in the web app | `rela list`, `rela export`, `rela validate` |
-| The list API, where `?query_scope=` selects one | `analyze_*` (cardinality, orphans, properties, validations) |
+| The list API, where `?query_scope=` selects one | `rela analyze` and the MCP `analyze` tool |
 | | MCP `list_entities`, Lua `rela.list_entities` |
 | | Trace and orphan reports |
 
-The split is not an oversight. If `analyze_cardinality` honoured a `default`
+The split is not an oversight. If the cardinality check honoured a `default`
 scope that hides archived rows, archiving an entity with a missing required
 relation would silence the violation — and `rela validate` would report clean
 over data it was never shown.

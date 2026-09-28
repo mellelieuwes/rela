@@ -164,33 +164,22 @@ var toolCalls = map[string]struct {
 	// outcome (the dispatch and decode still succeeded).
 	wantErr bool
 }{
-	"list_entities":       {args: `{"type":"requirement","limit":2}`},
-	"show_entity":         {args: `{"id":"REQ-001"}`},
-	"search_entities":     {args: `{"query":"requirement","limit":5}`},
-	"create_entity":       {args: `{"type":"requirement","properties":{"title":"Created via dispatch"}}`},
-	"update_entity":       {args: `{"id":"REQ-001","properties":{"status":"done"}}`},
-	"delete_entity":       {args: `{"id":"REQ-002","cascade":true}`},
-	"rename_entity":       {args: `{"id":"REQ-003","new_id":"REQ-099"}`},
-	"list_relations":      {args: `{}`},
-	"create_relation":     {args: `{"from":"DEC-001","type":"addresses","to":"REQ-002"}`},
-	"delete_relation":     {args: `{"from":"DEC-001","type":"addresses","to":"REQ-001"}`},
-	"trace_from":          {args: `{"id":"REQ-001","max_depth":3}`},
-	"trace_to":            {args: `{"id":"REQ-001"}`},
-	"find_path":           {args: `{"from":"DEC-001","to":"REQ-001"}`},
-	"analyze_orphans":     {args: `{}`},
-	"analyze_cardinality": {args: `{}`},
-	"analyze_unique":      {args: `{}`},
-	"analyze_properties":  {args: `{}`},
-	"analyze_validations": {args: `{}`},
-	"analyze_schema":      {args: `{"threshold":0}`},
-	"get_schema":          {args: `{}`},
-	"get_metamodel":       {args: `{}`}, // deprecated alias, must keep dispatching
-	"list_entity_types":   {args: `{}`},
-	"list_relation_types": {args: `{}`},
-	"export":              {args: `{"format":"json"}`},
-	"lua_eval":            {args: `{"code":"return 1"}`},
-	"lua_run":             {args: `{"path":"missing.lua"}`, wantErr: true}, // no scripts dir in fixture
-	"lua_list":            {args: `{}`},
+	"list_entities":   {args: `{"type":"requirement","filter":"entity.status == 'accepted'","limit":2}`},
+	"show_entity":     {args: `{"id":"REQ-001"}`},
+	"search_entities": {args: `{"query":"requirement","limit":5}`},
+	"create_entity":   {args: `{"type":"requirement","properties":{"title":"Created via dispatch"}}`},
+	"update_entity":   {args: `{"id":"REQ-001","properties":{"status":"done"}}`},
+	"delete_entity":   {args: `{"id":"REQ-002","cascade":true}`},
+	"rename_entity":   {args: `{"id":"REQ-003","new_id":"REQ-099"}`},
+	"list_relations":  {args: `{}`},
+	"create_relation": {args: `{"from":"DEC-001","type":"addresses","to":"REQ-002"}`},
+	"delete_relation": {args: `{"from":"DEC-001","type":"addresses","to":"REQ-001"}`},
+	"trace":           {args: `{"id":"REQ-001","max_depth":3}`},
+	"find_path":       {args: `{"from":"DEC-001","to":"REQ-001"}`},
+	"analyze":         {args: `{"check":"orphans"}`},
+	"schema":          {args: `{"type":"requirement"}`},
+	"lua_eval":        {args: `{"code":"return 1"}`},
+	"lua_run":         {args: `{"path":"missing.lua"}`, wantErr: true}, // no scripts dir in fixture
 	// The shared fixture declares no file property; these three decode their
 	// arguments and fail the property check. tools_attachment_test.go covers
 	// the behavior.
@@ -198,6 +187,26 @@ var toolCalls = map[string]struct {
 	"read_attachment":   {args: `{"id":"REQ-001","property":"title","file_name":"a.txt"}`, wantErr: true},
 	"attach_file":       {args: `{"id":"REQ-001","property":"title","file_name":"a.txt","content":"aGk="}`, wantErr: true},
 	"delete_attachment": {args: `{"id":"REQ-001","property":"title"}`, wantErr: true},
+}
+
+// TestDispatch_AnalyzeEveryCheck drives every analyze check through a real
+// tools/call, since the inventory table holds one call per tool name.
+func TestDispatch_AnalyzeEveryCheck(t *testing.T) {
+	t.Parallel()
+	for _, check := range analyzeChecks {
+		t.Run(check, func(t *testing.T) {
+			t.Parallel()
+			s := newDispatchServer(t)
+			text, isError := callTool(t, s, "analyze", fmt.Sprintf(`{"check":%q}`, check))
+			if isError {
+				t.Errorf("analyze %s: unexpected error: %s", check, text)
+			}
+		})
+	}
+	s := newDispatchServer(t)
+	if _, isError := callTool(t, s, "analyze", `{"check":"bogus"}`); !isError {
+		t.Error("analyze with an unknown check should fail")
+	}
 }
 
 // TestDispatch_ToolInventoryMatches pins the registered tool set via a
@@ -342,5 +351,17 @@ func TestDispatch_MalformedArgumentsSurface(t *testing.T) {
 	text, isError := callTool(t, s, "show_entity", `{}`)
 	if !isError {
 		t.Errorf("show_entity without required id should produce an error result, got: %s", text)
+	}
+}
+
+// TestDispatch_UnknownArgumentRejected pins that an undeclared argument is an
+// error. The removed `where` is the case that matters: dropping it silently
+// would return an unfiltered list the caller takes for a filtered one.
+func TestDispatch_UnknownArgumentRejected(t *testing.T) {
+	t.Parallel()
+	s := newDispatchServer(t)
+	text, isError := callTool(t, s, "list_entities", `{"type":"requirement","where":"status=accepted"}`)
+	if !isError || !strings.Contains(text, "unknown argument(s): where") || !strings.Contains(text, "filter") {
+		t.Errorf("want an unknown-argument error naming where and listing filter, got isError=%v %s", isError, text)
 	}
 }

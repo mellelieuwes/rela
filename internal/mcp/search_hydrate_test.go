@@ -6,10 +6,17 @@ import (
 	"testing"
 
 	"github.com/Sourcehaven-BV/rela/internal/entity"
+	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/search"
 	"github.com/Sourcehaven-BV/rela/internal/store/memstore"
 	"github.com/Sourcehaven-BV/rela/internal/store/storetest"
 )
+
+// hydrateMeta declares the two types seedHits stores.
+var hydrateMeta = &metamodel.Metamodel{Entities: map[string]metamodel.EntityDef{
+	"ticket": {DisplayProperty: "title"},
+	"policy": {DisplayProperty: "title"},
+}}
 
 // seedHits stores n default-face tickets plus one entity that exists only on
 // the "published" face, and returns a hit for each.
@@ -43,7 +50,7 @@ func seedHits(t *testing.T, n int) (*storetest.Counting, []search.Hit) {
 func TestHydrateHits_FacedHitSurvives(t *testing.T) {
 	st, hits := seedHits(t, 1)
 	missing := search.Hit{ID: "TKT-GONE", Type: "ticket"}
-	got, err := hydrateHits(context.Background(), st, append(hits, missing))
+	got, err := hydrateHits(context.Background(), st, hydrateMeta, append(hits, missing))
 	if err != nil {
 		t.Fatalf("hydrateHits: %v", err)
 	}
@@ -51,7 +58,7 @@ func TestHydrateHits_FacedHitSurvives(t *testing.T) {
 		t.Fatalf("summaries = %v, want the ticket and the faced policy (the missing hit dropped)", got)
 	}
 	pol := got[1]
-	if pol["id"] != "POL-1" || pol["face"] != "published" || pol["title"] != "retention policy" {
+	if pol.ID != "POL-1" || pol.Face != "published" || pol.Title != "retention policy" {
 		t.Errorf("faced summary = %v", pol)
 	}
 }
@@ -62,7 +69,7 @@ func TestHydrateHits_ReadBudget(t *testing.T) {
 	reads := func(n int) int {
 		st, hits := seedHits(t, n)
 		st.Reset()
-		if _, err := hydrateHits(context.Background(), st, hits); err != nil {
+		if _, err := hydrateHits(context.Background(), st, hydrateMeta, hits); err != nil {
 			t.Fatalf("hydrateHits: %v", err)
 		}
 		return st.Reads()

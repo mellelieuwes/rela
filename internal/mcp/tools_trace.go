@@ -7,41 +7,32 @@ import (
 
 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/tracer"
 )
 
-// traceHandler serves the trace_from / trace_to / find_path tools. A type of
-// its own rather than more methods on [Server] (the urlHelpers pattern,
-// TKT-YUETL7): tracing needs exactly two collaborators — the gated
-// [GraphReader] for existence probes and the tracer for traversal. Identity
-// still arrives on the ctx via Server.principalMiddleware; the handler holds
-// no principal.
+// Values of the trace tool's direction argument.
+const (
+	traceBoth     = "both"
+	traceUpstream = "upstream"
+)
+
+// traceHandler serves the trace / find_path tools. A type of its own rather
+// than more methods on [Server] (the urlHelpers pattern, TKT-YUETL7): tracing
+// needs the gated [GraphReader] for existence probes and path titles, the
+// tracer for traversal, and the metamodel to resolve display titles.
+// Identity still arrives on the ctx via Server.principalMiddleware; the
+// handler holds no principal.
 type traceHandler struct {
 	store  GraphReader
 	tracer tracer.Tracer
+	meta   *metamodel.Metamodel
 }
 
-func (h traceHandler) handleTraceFrom(
-	ctx context.Context, request *mcpgo.CallToolRequest,
-) (*mcpgo.CallToolResult, error) {
-	return h.handleTrace(ctx, request, func(t tracer.Tracer, id string, depth int) *tracer.TraceResult {
-		return t.TraceFrom(ctx, id, depth)
-	}, "No dependencies found")
-}
-
-func (h traceHandler) handleTraceTo(
-	ctx context.Context, request *mcpgo.CallToolRequest,
-) (*mcpgo.CallToolResult, error) {
-	return h.handleTrace(ctx, request, func(t tracer.Tracer, id string, depth int) *tracer.TraceResult {
-		return t.TraceTo(ctx, id, depth)
-	}, "No upstream dependencies found")
-}
-
+// handleTrace serves the trace tool. direction "both" is TraceFrom (outgoing
+// and incoming edges); "upstream" is TraceTo (incoming edges only).
 func (h traceHandler) handleTrace(
-	ctx context.Context,
-	request *mcpgo.CallToolRequest,
-	traceFn func(tracer.Tracer, string, int) *tracer.TraceResult,
-	emptyMsg string,
+	ctx context.Context, request *mcpgo.CallToolRequest,
 ) (*mcpgo.CallToolResult, error) {
 	args := newToolRequest(request)
 	id, err := args.RequireString("id")
@@ -50,6 +41,16 @@ func (h traceHandler) handleTrace(
 	}
 	id = trimID(id)
 	maxDepth := args.GetInt("max_depth", 0)
+
+	traceFn, emptyMsg := h.tracer.TraceFrom, "No dependencies found"
+	switch direction := args.GetString("direction", traceBoth); direction {
+	case traceBoth:
+	case traceUpstream:
+		traceFn, emptyMsg = h.tracer.TraceTo, "No upstream dependencies found"
+	default:
+		return errorResult(fmt.Sprintf("unknown direction %q (use %s or %s)",
+			direction, traceBoth, traceUpstream)), nil
+	}
 
 	// Existence probe BEFORE traversal. This must go through h.store —
 	// the gated GraphReader — not a raw handle: under a networked wiring a
@@ -62,12 +63,12 @@ func (h traceHandler) handleTrace(
 		return errorResult("entity not found: " + id), nil
 	}
 
-	result := traceFn(h.tracer, id, maxDepth)
+	result := traceFn(ctx, id, maxDepth)
 	if result == nil {
 		return textResult(emptyMsg), nil
 	}
 
-	text, err := convertTraceResult(result)
+	text, err := convertTraceResult(result, h.meta)
 	if err != nil {
 		return errorResult(err.Error()), nil
 	}
@@ -103,7 +104,16 @@ func (h traceHandler) handleFindPath(
 			fmt.Sprintf("No path found between %s and %s", from, to)), nil
 	}
 
-	text, err := convertPathSteps(path)
+	// A path is a handful of steps, so one gated read per step is cheap. It
+	// also keeps the title honest: a step read through h.store carries only
+	// the properties the caller may see.
+	text, err := convertPathSteps(path, func(step tracer.PathStep) string {
+		e, getErr := st.GetEntity(ctx, step.ID)
+		if getErr != nil {
+			return ""
+		}
+		return displayTitle(h.meta, e)
+	})
 	if err != nil {
 		return errorResult(err.Error()), nil
 	}

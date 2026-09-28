@@ -1,39 +1,9 @@
 [
   {
-    "tool": "analyze_cardinality",
-    "args": "{}",
+    "tool": "analyze",
+    "args": "{\"check\":\"orphans\"}",
     "isError": false,
-    "text": "All cardinality constraints satisfied"
-  },
-  {
-    "tool": "analyze_orphans",
-    "args": "{}",
-    "isError": false,
-    "text": "Found 2 orphan entities:\n\n[\n  {\n    \"id\": \"REQ-002\",\n    \"type\": \"requirement\",\n    \"title\": \"Second requirement\",\n    \"status\": \"draft\"\n  },\n  {\n    \"id\": \"REQ-003\",\n    \"type\": \"requirement\",\n    \"title\": \"Third requirement\",\n    \"status\": \"accepted\"\n  }\n]"
-  },
-  {
-    "tool": "analyze_properties",
-    "args": "{}",
-    "isError": false,
-    "text": "All entity and relation properties are valid"
-  },
-  {
-    "tool": "analyze_schema",
-    "args": "{\"threshold\":0}",
-    "isError": false,
-    "text": "All schema types are in use"
-  },
-  {
-    "tool": "analyze_unique",
-    "args": "{}",
-    "isError": false,
-    "text": "No unique constraint violations found"
-  },
-  {
-    "tool": "analyze_validations",
-    "args": "{}",
-    "isError": false,
-    "text": "No custom validation rules defined in metamodel"
+    "text": "{\"check\":\"orphans\",\"count\":2,\"results\":[{\"id\":\"REQ-002\",\"type\":\"requirement\",\"title\":\"Second requirement\",\"status\":\"draft\"},{\"id\":\"REQ-003\",\"type\":\"requirement\",\"title\":\"Third requirement\",\"status\":\"accepted\"}]}"
   },
   {
     "tool": "attach_file",
@@ -45,7 +15,7 @@
     "tool": "create_entity",
     "args": "{\"type\":\"requirement\",\"properties\":{\"title\":\"Created via dispatch\"}}",
     "isError": false,
-    "text": "Created requirement REQ-XXXX\n\n{\n  \"id\": \"REQ-XXXX\",\n  \"type\": \"requirement\",\n  \"properties\": {\n    \"status\": \"draft\",\n    \"title\": \"Created via dispatch\"\n  }\n}"
+    "text": "Created requirement REQ-XXXX\n\n{\"id\":\"REQ-XXXX\",\"type\":\"requirement\",\"properties\":{\"status\":\"draft\",\"title\":\"Created via dispatch\"}}"
   },
   {
     "tool": "create_relation",
@@ -72,28 +42,10 @@
     "text": "Removed link: DEC-001 --addresses--\u003e REQ-001"
   },
   {
-    "tool": "export",
-    "args": "{\"format\":\"json\"}",
-    "isError": false,
-    "text": "{\n  \"entities\": [\n    {\n      \"id\": \"DEC-001\",\n      \"properties\": {\n        \"status\": \"accepted\",\n        \"title\": \"First decision\"\n      },\n      \"type\": \"decision\"\n    },\n    {\n      \"id\": \"REQ-001\",\n      \"properties\": {\n        \"status\": \"accepted\",\n        \"title\": \"First requirement\"\n      },\n      \"type\": \"requirement\"\n    },\n    {\n      \"id\": \"REQ-002\",\n      \"properties\": {\n        \"status\": \"draft\",\n        \"title\": \"Second requirement\"\n      },\n      \"type\": \"requirement\"\n    },\n    {\n      \"id\": \"REQ-003\",\n      \"properties\": {\n        \"status\": \"accepted\",\n        \"title\": \"Third requirement\"\n      },\n      \"type\": \"requirement\"\n    }\n  ],\n  \"relations\": [\n    {\n      \"from\": \"DEC-001\",\n      \"relation\": \"addresses\",\n      \"to\": \"REQ-001\"\n    }\n  ]\n}"
-  },
-  {
     "tool": "find_path",
     "args": "{\"from\":\"DEC-001\",\"to\":\"REQ-001\"}",
     "isError": false,
-    "text": "[\n  {\n    \"id\": \"DEC-001\",\n    \"type\": \"decision\",\n    \"title\": \"First decision\"\n  },\n  {\n    \"id\": \"REQ-001\",\n    \"type\": \"requirement\",\n    \"title\": \"First requirement\",\n    \"relation\": \"addresses\"\n  }\n]"
-  },
-  {
-    "tool": "get_metamodel",
-    "args": "{}",
-    "isError": false,
-    "text": "{\n  \"entities\": {\n    \"decision\": {\n      \"Label\": \"Decision\",\n      \"LabelPlural\": \"\",\n      \"Description\": \"\",\n      \"Plural\": \"\",\n      \"Aliases\": null,\n      \"IDType\": \"\",\n      \"IDCaps\": \"\",\n      \"IDPrefix\": \"DEC\",\n      \"IDPrefixes\": null,\n      \"RDFType\": \"\",\n      \"Properties\": {\n        \"status\": {\n          \"Type\": \"string\",\n          \"Required\": false,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        },\n        \"title\": {\n          \"Type\": \"string\",\n          \"Required\": true,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        }\n      },\n      \"PropertyOrder\": null,\n      \"DefaultSort\": null,\n      \"Color\": \"\",\n      \"BorderColor\": \"\",\n      \"DisplayProperty\": \"\",\n      \"Faces\": null,\n      \"QueryScopes\": null\n    },\n    \"requirement\": {\n      \"Label\": \"Requirement\",\n      \"LabelPlural\": \"\",\n      \"Description\": \"\",\n      \"Plural\": \"\",\n      \"Aliases\": null,\n      \"IDType\": \"\",\n      \"IDCaps\": \"\",\n      \"IDPrefix\": \"REQ\",\n      \"IDPrefixes\": null,\n      \"RDFType\": \"\",\n      \"Properties\": {\n        \"priority\": {\n          \"Type\": \"string\",\n          \"Required\": false,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        },\n        \"status\": {\n          \"Type\": \"string\",\n          \"Required\": false,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        },\n        \"title\": {\n          \"Type\": \"string\",\n          \"Required\": true,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        }\n      },\n      \"PropertyOrder\": null,\n      \"DefaultSort\": null,\n      \"Color\": \"\",\n      \"BorderColor\": \"\",\n      \"DisplayProperty\": \"\",\n      \"Faces\": null,\n      \"QueryScopes\": null\n    }\n  },\n  \"namespace\": \"\",\n  \"relations\": {\n    \"addresses\": {\n      \"Label\": \"addresses\",\n      \"Description\": \"\",\n      \"From\": [\n        \"decision\"\n      ],\n      \"To\": [\n        \"requirement\"\n      ],\n      \"Inverse\": null,\n      \"Symmetric\": false,\n      \"MinOutgoing\": null,\n      \"MaxOutgoing\": null,\n      \"MinIncoming\": null,\n      \"MaxIncoming\": null,\n      \"Scope\": \"\",\n      \"Properties\": null,\n      \"Content\": false,\n      \"Orderable\": \"\"\n    }\n  },\n  \"types\": null,\n  \"version\": \"\"\n}"
-  },
-  {
-    "tool": "get_schema",
-    "args": "{}",
-    "isError": false,
-    "text": "{\n  \"entities\": {\n    \"decision\": {\n      \"Label\": \"Decision\",\n      \"LabelPlural\": \"\",\n      \"Description\": \"\",\n      \"Plural\": \"\",\n      \"Aliases\": null,\n      \"IDType\": \"\",\n      \"IDCaps\": \"\",\n      \"IDPrefix\": \"DEC\",\n      \"IDPrefixes\": null,\n      \"RDFType\": \"\",\n      \"Properties\": {\n        \"status\": {\n          \"Type\": \"string\",\n          \"Required\": false,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        },\n        \"title\": {\n          \"Type\": \"string\",\n          \"Required\": true,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        }\n      },\n      \"PropertyOrder\": null,\n      \"DefaultSort\": null,\n      \"Color\": \"\",\n      \"BorderColor\": \"\",\n      \"DisplayProperty\": \"\",\n      \"Faces\": null,\n      \"QueryScopes\": null\n    },\n    \"requirement\": {\n      \"Label\": \"Requirement\",\n      \"LabelPlural\": \"\",\n      \"Description\": \"\",\n      \"Plural\": \"\",\n      \"Aliases\": null,\n      \"IDType\": \"\",\n      \"IDCaps\": \"\",\n      \"IDPrefix\": \"REQ\",\n      \"IDPrefixes\": null,\n      \"RDFType\": \"\",\n      \"Properties\": {\n        \"priority\": {\n          \"Type\": \"string\",\n          \"Required\": false,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        },\n        \"status\": {\n          \"Type\": \"string\",\n          \"Required\": false,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        },\n        \"title\": {\n          \"Type\": \"string\",\n          \"Required\": true,\n          \"Values\": null,\n          \"Labels\": null,\n          \"Default\": \"\",\n          \"Description\": \"\",\n          \"Format\": \"\",\n          \"List\": false,\n          \"Unique\": false,\n          \"Max\": 0,\n          \"Accept\": null,\n          \"Scan\": 0,\n          \"ScanCmd\": null,\n          \"Transform\": null\n        }\n      },\n      \"PropertyOrder\": null,\n      \"DefaultSort\": null,\n      \"Color\": \"\",\n      \"BorderColor\": \"\",\n      \"DisplayProperty\": \"\",\n      \"Faces\": null,\n      \"QueryScopes\": null\n    }\n  },\n  \"namespace\": \"\",\n  \"relations\": {\n    \"addresses\": {\n      \"Label\": \"addresses\",\n      \"Description\": \"\",\n      \"From\": [\n        \"decision\"\n      ],\n      \"To\": [\n        \"requirement\"\n      ],\n      \"Inverse\": null,\n      \"Symmetric\": false,\n      \"MinOutgoing\": null,\n      \"MaxOutgoing\": null,\n      \"MinIncoming\": null,\n      \"MaxIncoming\": null,\n      \"Scope\": \"\",\n      \"Properties\": null,\n      \"Content\": false,\n      \"Orderable\": \"\"\n    }\n  },\n  \"types\": null,\n  \"version\": \"\"\n}"
+    "text": "[{\"id\":\"DEC-001\",\"type\":\"decision\",\"title\":\"First decision\"},{\"id\":\"REQ-001\",\"type\":\"requirement\",\"title\":\"First requirement\",\"relation\":\"addresses\"}]"
   },
   {
     "tool": "list_attachments",
@@ -103,39 +55,21 @@
   },
   {
     "tool": "list_entities",
-    "args": "{\"type\":\"requirement\",\"limit\":2}",
+    "args": "{\"type\":\"requirement\",\"filter\":\"entity.status == 'accepted'\",\"limit\":2}",
     "isError": false,
-    "text": "[\n  {\n    \"id\": \"REQ-001\",\n    \"status\": \"accepted\",\n    \"title\": \"First requirement\",\n    \"type\": \"requirement\"\n  },\n  {\n    \"id\": \"REQ-002\",\n    \"status\": \"draft\",\n    \"title\": \"Second requirement\",\n    \"type\": \"requirement\"\n  }\n]"
-  },
-  {
-    "tool": "list_entity_types",
-    "args": "{}",
-    "isError": false,
-    "text": "[\n  {\n    \"name\": \"decision\",\n    \"label\": \"Decision\",\n    \"id_type\": \"short\",\n    \"id_prefixes\": [\n      \"DEC\"\n    ],\n    \"properties\": {\n      \"status\": {\n        \"Type\": \"string\",\n        \"Required\": false,\n        \"Values\": null,\n        \"Labels\": null,\n        \"Default\": \"\",\n        \"Description\": \"\",\n        \"Format\": \"\",\n        \"List\": false,\n        \"Unique\": false,\n        \"Max\": 0,\n        \"Accept\": null,\n        \"Scan\": 0,\n        \"ScanCmd\": null,\n        \"Transform\": null\n      },\n      \"title\": {\n        \"Type\": \"string\",\n        \"Required\": true,\n        \"Values\": null,\n        \"Labels\": null,\n        \"Default\": \"\",\n        \"Description\": \"\",\n        \"Format\": \"\",\n        \"List\": false,\n        \"Unique\": false,\n        \"Max\": 0,\n        \"Accept\": null,\n        \"Scan\": 0,\n        \"ScanCmd\": null,\n        \"Transform\": null\n      }\n    },\n    \"count\": 1\n  },\n  {\n    \"name\": \"requirement\",\n    \"label\": \"Requirement\",\n    \"id_type\": \"short\",\n    \"id_prefixes\": [\n      \"REQ\"\n    ],\n    \"properties\": {\n      \"priority\": {\n        \"Type\": \"string\",\n        \"Required\": false,\n        \"Values\": null,\n        \"Labels\": null,\n        \"Default\": \"\",\n        \"Description\": \"\",\n        \"Format\": \"\",\n        \"List\": false,\n        \"Unique\": false,\n        \"Max\": 0,\n        \"Accept\": null,\n        \"Scan\": 0,\n        \"ScanCmd\": null,\n        \"Transform\": null\n      },\n      \"status\": {\n        \"Type\": \"string\",\n        \"Required\": false,\n        \"Values\": null,\n        \"Labels\": null,\n        \"Default\": \"\",\n        \"Description\": \"\",\n        \"Format\": \"\",\n        \"List\": false,\n        \"Unique\": false,\n        \"Max\": 0,\n        \"Accept\": null,\n        \"Scan\": 0,\n        \"ScanCmd\": null,\n        \"Transform\": null\n      },\n      \"title\": {\n        \"Type\": \"string\",\n        \"Required\": true,\n        \"Values\": null,\n        \"Labels\": null,\n        \"Default\": \"\",\n        \"Description\": \"\",\n        \"Format\": \"\",\n        \"List\": false,\n        \"Unique\": false,\n        \"Max\": 0,\n        \"Accept\": null,\n        \"Scan\": 0,\n        \"ScanCmd\": null,\n        \"Transform\": null\n      }\n    },\n    \"count\": 3\n  }\n]"
-  },
-  {
-    "tool": "list_relation_types",
-    "args": "{}",
-    "isError": false,
-    "text": "[\n  {\n    \"name\": \"addresses\",\n    \"label\": \"addresses\",\n    \"from\": [\n      \"decision\"\n    ],\n    \"to\": [\n      \"requirement\"\n    ],\n    \"count\": 1\n  }\n]"
+    "text": "{\"total\":2,\"has_more\":false,\"entities\":[{\"id\":\"REQ-001\",\"type\":\"requirement\",\"title\":\"First requirement\",\"status\":\"accepted\"},{\"id\":\"REQ-003\",\"type\":\"requirement\",\"title\":\"Third requirement\",\"status\":\"accepted\"}]}"
   },
   {
     "tool": "list_relations",
     "args": "{}",
     "isError": false,
-    "text": "[\n  {\n    \"from\": \"DEC-001\",\n    \"relation\": \"addresses\",\n    \"to\": \"REQ-001\"\n  }\n]"
+    "text": "{\"total\":1,\"has_more\":false,\"relations\":[{\"from\":\"DEC-001\",\"relation\":\"addresses\",\"to\":\"REQ-001\"}]}"
   },
   {
     "tool": "lua_eval",
     "args": "{\"code\":\"return 1\"}",
     "isError": false,
     "text": "Script executed successfully (no output)"
-  },
-  {
-    "tool": "lua_list",
-    "args": "{}",
-    "isError": false,
-    "text": "No Lua scripts found in scripts/ directory"
   },
   {
     "tool": "lua_run",
@@ -156,33 +90,33 @@
     "text": "Renamed: REQ-003 → REQ-099 (0 relations updated)"
   },
   {
+    "tool": "schema",
+    "args": "{\"type\":\"requirement\"}",
+    "isError": false,
+    "text": "{\"name\":\"requirement\",\"id_type\":\"short\",\"id_prefixes\":[\"REQ\"],\"count\":3,\"properties\":{\"priority\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"},\"title\":{\"type\":\"string\",\"required\":true}},\"incoming\":[{\"relation\":\"addresses\",\"types\":[\"decision\"]}]}"
+  },
+  {
     "tool": "search_entities",
     "args": "{\"query\":\"requirement\",\"limit\":5}",
     "isError": false,
-    "text": "[\n  {\n    \"id\": \"REQ-001\",\n    \"status\": \"accepted\",\n    \"title\": \"First requirement\",\n    \"type\": \"requirement\"\n  },\n  {\n    \"id\": \"REQ-002\",\n    \"status\": \"draft\",\n    \"title\": \"Second requirement\",\n    \"type\": \"requirement\"\n  },\n  {\n    \"id\": \"REQ-003\",\n    \"status\": \"accepted\",\n    \"title\": \"Third requirement\",\n    \"type\": \"requirement\"\n  }\n]"
+    "text": "[{\"id\":\"REQ-001\",\"type\":\"requirement\",\"title\":\"First requirement\",\"status\":\"accepted\"},{\"id\":\"REQ-002\",\"type\":\"requirement\",\"title\":\"Second requirement\",\"status\":\"draft\"},{\"id\":\"REQ-003\",\"type\":\"requirement\",\"title\":\"Third requirement\",\"status\":\"accepted\"}]"
   },
   {
     "tool": "show_entity",
     "args": "{\"id\":\"REQ-001\"}",
     "isError": false,
-    "text": "{\n  \"id\": \"REQ-001\",\n  \"type\": \"requirement\",\n  \"properties\": {\n    \"status\": \"accepted\",\n    \"title\": \"First requirement\"\n  },\n  \"relations\": {\n    \"incoming\": {\n      \"addresses\": [\n        {\n          \"id\": \"DEC-001\",\n          \"title\": \"First decision\"\n        }\n      ]\n    }\n  }\n}"
+    "text": "{\"id\":\"REQ-001\",\"type\":\"requirement\",\"properties\":{\"status\":\"accepted\",\"title\":\"First requirement\"},\"relations\":{\"incoming\":{\"addresses\":[{\"id\":\"DEC-001\",\"title\":\"First decision\"}]}}}"
   },
   {
-    "tool": "trace_from",
+    "tool": "trace",
     "args": "{\"id\":\"REQ-001\",\"max_depth\":3}",
     "isError": false,
-    "text": "{\n  \"id\": \"REQ-001\",\n  \"type\": \"requirement\",\n  \"title\": \"First requirement\",\n  \"depth\": 0,\n  \"children\": [\n    {\n      \"id\": \"DEC-001\",\n      \"type\": \"decision\",\n      \"title\": \"First decision\",\n      \"depth\": 1,\n      \"relation\": \"addresses\",\n      \"incoming\": true,\n      \"children\": [\n        {\n          \"id\": \"REQ-001\",\n          \"type\": \"requirement\",\n          \"title\": \"First requirement\",\n          \"depth\": 2,\n          \"relation\": \"addresses\"\n        }\n      ]\n    }\n  ]\n}"
-  },
-  {
-    "tool": "trace_to",
-    "args": "{\"id\":\"REQ-001\"}",
-    "isError": false,
-    "text": "{\n  \"id\": \"REQ-001\",\n  \"type\": \"requirement\",\n  \"title\": \"First requirement\",\n  \"depth\": 0,\n  \"children\": [\n    {\n      \"id\": \"DEC-001\",\n      \"type\": \"decision\",\n      \"title\": \"First decision\",\n      \"depth\": 1,\n      \"relation\": \"addresses\"\n    }\n  ]\n}"
+    "text": "{\"id\":\"REQ-001\",\"type\":\"requirement\",\"title\":\"First requirement\",\"children\":[{\"id\":\"DEC-001\",\"type\":\"decision\",\"title\":\"First decision\",\"relation\":\"addresses\",\"incoming\":true,\"children\":[{\"id\":\"REQ-001\",\"type\":\"requirement\",\"title\":\"First requirement\",\"relation\":\"addresses\"}]}]}"
   },
   {
     "tool": "update_entity",
     "args": "{\"id\":\"REQ-001\",\"properties\":{\"status\":\"done\"}}",
     "isError": false,
-    "text": "Updated REQ-001\n\n{\n  \"id\": \"REQ-001\",\n  \"type\": \"requirement\",\n  \"properties\": {\n    \"status\": \"done\",\n    \"title\": \"First requirement\"\n  },\n  \"relations\": {\n    \"incoming\": {\n      \"addresses\": [\n        {\n          \"id\": \"DEC-001\",\n          \"title\": \"First decision\"\n        }\n      ]\n    }\n  }\n}"
+    "text": "Updated REQ-001\n\n{\"id\":\"REQ-001\",\"type\":\"requirement\",\"properties\":{\"status\":\"done\",\"title\":\"First requirement\"}}"
   }
 ]

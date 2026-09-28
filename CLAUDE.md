@@ -982,10 +982,10 @@ When creating or updating entities in `rela-issues-and-design-tickets`:
 
 1. **Create the entity** with required properties
 2. **Run ALL analyze tools** to check for issues:
-   - `analyze_cardinality` - check required relations
-   - `analyze_orphans` - find unlinked entities
-   - `analyze_properties` - validate property values
-   - `analyze_validations` - run custom validation rules
+   - `analyze` with `check: cardinality` - check required relations
+   - `analyze` with `check: orphans` - find unlinked entities
+   - `analyze` with `check: properties` - validate property values
+   - `analyze` with `check: validations` - run custom validation rules
 3. **Fix any violations** (create missing relations, add required properties,
    etc.)
 4. **Repeat analysis until ALL checks pass** - do not stop after fixing one
@@ -1029,7 +1029,7 @@ The metamodel includes validation rules that enforce:
 - Ready tickets need `effort`, `priority`, and `description`
 - Accepted decisions need `date`, `context`, and `consequences`
 
-Always run `analyze_validations` to catch these issues.
+Always run `analyze` with `check: validations` to catch these issues.
 
 ### 5-Whys for Bug Analysis
 

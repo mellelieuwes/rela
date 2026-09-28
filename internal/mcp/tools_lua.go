@@ -37,25 +37,15 @@ func toolLuaEval() *mcpgo.Tool {
 func toolLuaRun() *mcpgo.Tool {
 	return newTool("lua_run",
 		withDescription(
-			"Execute a Lua script file against the rela graph. "+
-				"Scripts must be located in the 'scripts/' directory. "+
+			"Run a Lua script from the project's scripts/ directory. "+
+				"Omit path to list the available scripts. "+
 				"Use rela.output(data) to return results as JSON."),
-		withString("path", required(),
-			description("Script filename or path within scripts/ (e.g., 'export.lua' or 'reports/summary.lua')")),
-		withArray("args",
-			description("Arguments to pass to the script (available as rela.args)")),
+		withString("path", description("Script path within scripts/, e.g. reports/summary.lua")),
+		withArray("args", description("Arguments, available as rela.args")),
 	)
 }
 
-func toolLuaList() *mcpgo.Tool {
-	return newTool("lua_list",
-		withDescription(
-			"List available Lua scripts in the scripts/ directory. "+
-				"Only scripts in this directory can be executed via lua_run."),
-	)
-}
-
-// luaHandler serves the lua_eval / lua_run / lua_list tools. A type of its
+// luaHandler serves the lua_eval / lua_run tools. A type of its
 // own rather than more methods on [Server] (the urlHelpers pattern,
 // TKT-MGNE5L): the lua tools are the ONLY consumers of the write-capable
 // runtime deps, the script cache, and the project root — holding them here
@@ -122,9 +112,9 @@ func (h luaHandler) handleLuaEval(ctx context.Context, req *mcpgo.CallToolReques
 
 func (h luaHandler) handleLuaRun(ctx context.Context, req *mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	in := newToolRequest(req)
-	path, err := in.RequireString("path")
-	if err != nil {
-		return errorResult(err.Error()), nil
+	path := strings.TrimSpace(in.GetString("path", ""))
+	if path == "" {
+		return h.listScripts(), nil
 	}
 
 	// Security: Validate path is local (no "..", no absolute paths)
@@ -244,8 +234,11 @@ func luaScriptErrorResult(surface lua.Surface, envelopePath, projectRoot string,
 	return errorResult(string(body))
 }
 
-func (h luaHandler) handleLuaList(_ context.Context, _ *mcpgo.CallToolRequest,
-) (*mcpgo.CallToolResult, error) {
+// listScripts answers lua_run without a path: the .lua files under scripts/.
+// It is part of lua_run rather than a tool of its own because a tool costs
+// context in every session, and the list is only ever wanted right before a
+// run.
+func (h luaHandler) listScripts() *mcpgo.CallToolResult {
 	projectRoot := h.projectRoot
 
 	// Only search the scripts/ directory (security restriction)
@@ -274,7 +267,7 @@ func (h luaHandler) handleLuaList(_ context.Context, _ *mcpgo.CallToolRequest,
 	})
 
 	if len(scripts) == 0 {
-		return textResult("No Lua scripts found in scripts/ directory"), nil
+		return textResult("No Lua scripts found in scripts/ directory")
 	}
 
 	var result strings.Builder
@@ -284,7 +277,7 @@ func (h luaHandler) handleLuaList(_ context.Context, _ *mcpgo.CallToolRequest,
 		result.WriteString(script)
 		result.WriteString("\n")
 	}
-	result.WriteString("\nUse lua_run with the script name to execute.")
+	result.WriteString("\nPass one as path to run it.")
 
-	return textResult(result.String()), nil
+	return textResult(result.String())
 }

@@ -181,7 +181,7 @@ Everything else previous drafts would 422 on. The API performs the requested
 write and returns warnings in the response body so UIs surface them
 non-blockingly. Each warning is `{code, path, detail}` where:
 
-- `code` is stable and matches the corresponding `analyze_*` finding code
+- `code` is stable and matches the corresponding `analyze` finding code
 - `path` is an RFC 6901 JSON Pointer to the offending field
 - `detail` is a human-readable explanation
 
@@ -207,7 +207,7 @@ Warning codes:
 | `required_meta_unset` | Required meta property absent after merge |
 | `meta_type_mismatch` | Meta value's type doesn't match the declared property type |
 
-A read of `analyze_orphans` / `analyze_validations` will surface the same
+The `orphans` and `validations` analyze checks surface the same
 findings; clients may de-duplicate by `code`.
 
 Entity-level warnings reflect the **post-write entity state** — if the
@@ -447,7 +447,7 @@ that's expected and documents the scope.
   path doesn't propagate at all; an independent ticket would address it if
   needed.
 - **Cardinality enforcement.** `min_outgoing` / `max_outgoing` are advisory
-  (surfaced via `analyze_*`), never enforced at write time.
+  (surfaced via `analyze`), never enforced at write time.
 - **Granular relations diff verbs** (à la GraphQL `connect`/`disconnect`).
   v1 is replacement-only at the list level + upsert at the per-edge level.
 - **Cross-entity atomic transactions.** A single PATCH targets one entity;

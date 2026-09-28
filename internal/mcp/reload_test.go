@@ -56,7 +56,7 @@ func TestReloadDeps_NewTypeVisibleToSchemaTools(t *testing.T) {
 	t.Parallel()
 	s, st := makeTestServerWithStore(t)
 
-	before, err := group(s, selSchemaRes).handleListEntityTypes(context.Background(), &mcpgo.CallToolRequest{})
+	before, err := group(s, selSchemaRes).handleSchema(context.Background(), &mcpgo.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("list types before reload: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestReloadDeps_NewTypeVisibleToSchemaTools(t *testing.T) {
 		t.Fatalf("ReloadDeps: %v", reloadErr)
 	}
 
-	after, err := group(s, selSchemaRes).handleListEntityTypes(context.Background(), &mcpgo.CallToolRequest{})
+	after, err := group(s, selSchemaRes).handleSchema(context.Background(), &mcpgo.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("list types after reload: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestReloadDeps_NewTypeVisibleToSchemaTools(t *testing.T) {
 //
 // create_entity validates through the entitymanager, which holds its OWN
 // metamodel. A reload that refreshed only the read surfaces would leave this
-// create failing against the old schema while get_schema happily advertised
+// create failing against the old schema while the schema tool happily advertised
 // the new type — a half-updated server, which is harder to diagnose than one
 // that never updated at all.
 func TestReloadDeps_NewTypeIsWritable(t *testing.T) {
@@ -123,7 +123,7 @@ func TestReloadDeps_NewTypeIsWritable(t *testing.T) {
 // TestReloadDeps_ReachesRegisteredHandlers guards the trap this change was
 // built around.
 //
-// Handlers used to be registered as method values (`s.trace.handleTraceFrom`),
+// Handlers used to be registered as method values (`s.trace.handleTrace`),
 // which capture the handler group — and through it the metamodel — BY VALUE at
 // registration time. A reloaded snapshot could never reach them, and the
 // failure was silent: the tool kept working, just against the old schema. This
@@ -134,7 +134,7 @@ func TestReloadDeps_ReachesRegisteredHandlers(t *testing.T) {
 	s, st := makeTestServerWithStore(t)
 
 	// Bound exactly as registerTools binds it, BEFORE the reload.
-	registered := bind(s, selSchemaRes, schemaResourceHandler.handleListEntityTypes)
+	registered := bind(s, selSchemaRes, schemaResourceHandler.handleSchema)
 
 	if err := s.ReloadDeps(newTestDeps(t, metaWithRisk(), st)); err != nil {
 		t.Fatalf("ReloadDeps: %v", err)
@@ -168,7 +168,7 @@ func TestReloadDeps_RejectsInvalidBundleAndKeepsPrevious(t *testing.T) {
 	if s.deps().Meta == nil {
 		t.Fatal("a rejected reload cleared the published metamodel")
 	}
-	result, err := group(s, selSchemaRes).handleListEntityTypes(context.Background(), &mcpgo.CallToolRequest{})
+	result, err := group(s, selSchemaRes).handleSchema(context.Background(), &mcpgo.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("list types after rejected reload: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestReloadDeps_ConcurrentWithRequests(t *testing.T) {
 	s, st := makeTestServerWithStore(t)
 
 	// Bound once, up front, the way registerTools binds a real tool.
-	listTypes := bind(s, selSchemaRes, schemaResourceHandler.handleListEntityTypes)
+	listTypes := bind(s, selSchemaRes, schemaResourceHandler.handleSchema)
 
 	var wg sync.WaitGroup
 	wg.Add(2)

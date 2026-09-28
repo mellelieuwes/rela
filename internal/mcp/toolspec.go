@@ -1,7 +1,12 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
 
 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -141,4 +146,46 @@ func description(d string) propOption {
 // enum constrains a string property to a fixed value set.
 func enum(values ...string) propOption {
 	return func(p *schemaProperty, _ *toolSpec, _ string) { p.Enum = values }
+}
+
+// addTool registers tool with a handler that first refuses any argument the
+// tool does not declare. Without this a misspelled or removed argument (such
+// as list_entities' old `where`) is dropped silently, and the caller receives
+// an unfiltered answer it takes for a filtered one. A free function, like [setDeps], to keep
+// Server under its plimsoll load line.
+func addTool(s *Server, tool *mcpgo.Tool, handler mcpgo.ToolHandler) {
+	known := declaredArguments(tool)
+	s.mcp.AddTool(tool, func(ctx context.Context, req *mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		var unknown []string
+		for name := range newToolRequest(req).GetArguments() {
+			if _, ok := known[name]; !ok {
+				unknown = append(unknown, name)
+			}
+		}
+		if len(unknown) > 0 {
+			slices.Sort(unknown)
+			return errorResult(fmt.Sprintf("unknown argument(s): %s; %s takes: %s",
+				strings.Join(unknown, ", "), tool.Name, strings.Join(slices.Sorted(maps.Keys(known)), ", "))), nil
+		}
+		return handler(ctx, req)
+	})
+}
+
+// declaredArguments returns the argument names in tool's input schema.
+func declaredArguments(tool *mcpgo.Tool) map[string]struct{} {
+	raw, ok := tool.InputSchema.(json.RawMessage)
+	if !ok {
+		panic("mcp: tool " + tool.Name + " has no raw input schema") // coverage-ignore: invariant: newTool sets it
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		panic("mcp: parse input schema for tool " + tool.Name + ": " + err.Error()) // coverage-ignore: invariant: newTool marshals it
+	}
+	known := make(map[string]struct{}, len(schema.Properties))
+	for name := range schema.Properties {
+		known[name] = struct{}{}
+	}
+	return known
 }

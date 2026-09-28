@@ -56,11 +56,11 @@ func gatedServer(t *testing.T) (*Server, context.Context) {
 	meta := &metamodel.Metamodel{
 		Entities: map[string]metamodel.EntityDef{
 			"ticket": {
-				Label: "Ticket", IDPrefix: "TKT",
+				Label: "Ticket", IDPrefix: "TKT", DisplayProperty: "title",
 				Properties: map[string]metamodel.PropertyDef{"title": {Type: "string"}},
 			},
 			"feature": {
-				Label: "Feature", IDPrefix: "FEAT",
+				Label: "Feature", IDPrefix: "FEAT", DisplayProperty: "title",
 				Properties: map[string]metamodel.PropertyDef{"title": {Type: "string"}},
 			},
 		},
@@ -104,6 +104,7 @@ func gatedServer(t *testing.T) (*Server, context.Context) {
 	reads := svc.GatedReads()
 	deps := Deps{
 		Store:         reads.Reader,
+		Traversals:    reads.Traversals,
 		Meta:          meta,
 		Tracer:        reads.Tracer,
 		Searcher:      reads.Searcher,
@@ -234,6 +235,38 @@ func TestACL_ListEntities_OmitsHidden(t *testing.T) {
 	}
 }
 
+// TestACL_ListEntities_RelatedFilterSeesOnlyVisibleEdges pins the filter's
+// traversal gate: alice's ticket relates to a feature she cannot read, so to
+// her the edge does not exist. A filter answered ungated would match the
+// ticket and confirm the hidden feature.
+func TestACL_ListEntities_RelatedFilterSeesOnlyVisibleEdges(t *testing.T) {
+	t.Parallel()
+	s, ctx := gatedServer(t)
+
+	tests := []struct {
+		filter    string
+		wantMatch bool
+	}{
+		{"related(entity, 'relates-to')", false},
+		{"not related(entity, 'relates-to')", true},
+	}
+	for _, tc := range tests {
+		result, err := s.handleListEntities(ctx, makeToolRequest(map[string]any{
+			"type": "ticket", "filter": tc.filter,
+		}))
+		if err != nil {
+			t.Fatalf("list_entities: %v", err)
+		}
+		text := getResultText(t, result)
+		if result.IsError {
+			t.Fatalf("%s: unexpected error: %s", tc.filter, text)
+		}
+		if got := strings.Contains(text, visibleID); got != tc.wantMatch {
+			t.Errorf("LEAK: %s matched=%v, want %v: %s", tc.filter, got, tc.wantMatch, text)
+		}
+	}
+}
+
 // TestACL_ShowEntity_WithholdsHiddenNeighbor is RR-CFFL52: show_entity on a
 // READABLE entity must not disclose an unreadable neighbor through its
 // embedded relations block — neither the title nor, crucially, the id, since
@@ -291,7 +324,7 @@ func TestACL_BuildStoreRelations_WithholdsUnreadableEdge(t *testing.T) {
 		t.Fatalf("seed relation: %v", err)
 	}
 
-	rels := buildStoreRelations(ctx, visibleID, denyEntityReader{raw: st, deny: hiddenID})
+	rels := buildStoreRelations(ctx, visibleID, denyEntityReader{raw: st, deny: hiddenID}, testMeta())
 	if rels == nil {
 		return // withheld entirely — correct
 	}
@@ -366,22 +399,22 @@ func TestACL_Resources_AreGated(t *testing.T) {
 }
 
 // TestACL_Trace_HiddenRootIsNotAnOracle is RR-FTJUUE: the pre-flight
-// existence probe in trace_from must run through the gated reader, so a
+// existence probe in trace must run through the gated reader, so a
 // hidden root reports what an absent one does.
 func TestACL_Trace_HiddenRootIsNotAnOracle(t *testing.T) {
 	t.Parallel()
 	s, ctx := gatedServer(t)
 
-	hidden, err := group(s, selTrace).handleTraceFrom(ctx, makeToolRequest(map[string]any{"id": hiddenID}))
+	hidden, err := group(s, selTrace).handleTrace(ctx, makeToolRequest(map[string]any{"id": hiddenID}))
 	if err != nil {
-		t.Fatalf("trace_from(hidden): %v", err)
+		t.Fatalf("trace(hidden): %v", err)
 	}
-	absent, err := group(s, selTrace).handleTraceFrom(ctx, makeToolRequest(map[string]any{"id": "NO-SUCH-ID"}))
+	absent, err := group(s, selTrace).handleTrace(ctx, makeToolRequest(map[string]any{"id": "NO-SUCH-ID"}))
 	if err != nil {
-		t.Fatalf("trace_from(absent): %v", err)
+		t.Fatalf("trace(absent): %v", err)
 	}
 	if !isErrorResult(hidden) {
-		t.Fatalf("trace_from on a hidden root succeeded: %s", getResultText(t, hidden))
+		t.Fatalf("trace on a hidden root succeeded: %s", getResultText(t, hidden))
 	}
 	if norm(getResultText(t, hidden), hiddenID) != norm(getResultText(t, absent), "NO-SUCH-ID") {
 		t.Errorf("hidden and absent roots distinguishable:\n hidden: %s\n absent: %s",

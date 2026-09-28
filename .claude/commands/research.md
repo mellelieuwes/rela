@@ -22,7 +22,7 @@ Using the rela MCP tools (rela-issues-and-design-tickets):
    - Link to concepts via `researches` relation
    - Link to ticket/feature via the ticket/feature's `has-research` relation (if applicable)
 
-3. Run `analyze_cardinality` and `analyze_validations` to verify
+3. Run `analyze` (`check: cardinality`) and `analyze` (`check: validations`) to verify
 
 ## Step 2: Survey
 
@@ -63,7 +63,7 @@ Update the research entity body with findings:
    - Set `summary` to a one-line conclusion
    - Set status to `done`
 2. If research was linked to a ticket, create an `informs` relation from the research to any decisions it led to
-3. Run `analyze_validations` — must pass
+3. Run `analyze` (`check: validations`) — must pass
 
 ## Step 5: Present to User
 

@@ -94,7 +94,7 @@ func TestConvertStoreEntity_WithoutRelations(t *testing.T) {
 	e := buildEntity(testutil.EntityFor(meta, "requirement").ID("REQ-001").With("title", "Test requirement").WithContent("Some content"))
 	seedEntity(t, st, e)
 
-	result, err := convertStoreEntity(context.Background(), e, st, false)
+	result, err := convertStoreEntity(context.Background(), e, st, meta, entityView{content: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestConvertStoreEntity_WithRelations(t *testing.T) {
 	seedEntity(t, st, e2)
 	seedRelation(t, st, e2.ID, "addresses", e1.ID)
 
-	result, err := convertStoreEntity(context.Background(), e1, st, true)
+	result, err := convertStoreEntity(context.Background(), e1, st, meta, entityView{relations: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestConvertStoreEntity_NoRelationsPresent(t *testing.T) {
 	e := buildEntity(testutil.EntityFor(meta, "requirement").ID("REQ-001"))
 	seedEntity(t, st, e)
 
-	result, err := convertStoreEntity(context.Background(), e, st, true)
+	result, err := convertStoreEntity(context.Background(), e, st, meta, entityView{relations: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,19 +180,11 @@ func TestConvertStoreEntitySummary(t *testing.T) {
 	meta := testMeta()
 	e := buildEntity(testutil.EntityFor(meta, "requirement").ID("REQ-001").With("title", "My Title").With("status", "accepted"))
 
-	result := convertStoreEntitySummary(e)
+	result := convertStoreEntitySummary(meta, e)
 
-	if result["id"] != e.ID {
-		t.Errorf("expected id %s, got %v", e.ID, result["id"])
-	}
-	if result["type"] != e.Type {
-		t.Errorf("expected type %s, got %v", e.Type, result["type"])
-	}
-	if result["title"] != e.Properties["title"] {
-		t.Errorf("expected title '%v', got %v", e.Properties["title"], result["title"])
-	}
-	if result["status"] != e.Properties["status"] {
-		t.Errorf("expected status '%v', got %v", e.Properties["status"], result["status"])
+	want := entitySummary{ID: e.ID, Type: e.Type, Title: "My Title", Status: "accepted"}
+	if result != want {
+		t.Errorf("summary = %+v, want %+v", result, want)
 	}
 }
 
@@ -201,16 +193,12 @@ func TestConvertStoreEntitySummary_NoTitleNoStatus(t *testing.T) {
 	meta := testMeta()
 	e := buildEntity(testutil.EntityFor(meta, "requirement").ID("REQ-002").Without("title").Without("status"))
 
-	result := convertStoreEntitySummary(e)
-
-	if result["id"] != e.ID {
-		t.Errorf("expected id %s, got %v", e.ID, result["id"])
+	text, err := marshalJSON(convertStoreEntitySummary(meta, e))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := result["title"]; ok {
-		t.Error("expected no title key when title is empty")
-	}
-	if _, ok := result["status"]; ok {
-		t.Error("expected no status key when status is empty")
+	if want := `{"id":"REQ-002","type":"requirement"}`; text != want {
+		t.Errorf("summary = %s, want %s", text, want)
 	}
 }
 
@@ -276,23 +264,25 @@ func TestConvertStoreRelation_NoProperties(t *testing.T) {
 func TestConvertTraceResult(t *testing.T) {
 	t.Parallel()
 	tr := &tracer.TraceResult{
-		ID:    "REQ-001",
-		Type:  "requirement",
-		Title: "Root Req",
-		Depth: 0,
+		ID:         "REQ-001",
+		Type:       "requirement",
+		Title:      "Root Req",
+		Properties: map[string]any{"title": "Root Req"},
+		Depth:      0,
 		Children: []*tracer.TraceResult{
 			{
-				ID:       "SOL-001",
-				Type:     "solution",
-				Title:    "Child Sol",
-				Depth:    1,
-				Relation: "addresses",
-				Incoming: true,
+				ID:         "SOL-001",
+				Type:       "solution",
+				Title:      "Child Sol",
+				Properties: map[string]any{"title": "Child Sol"},
+				Depth:      1,
+				Relation:   "addresses",
+				Incoming:   true,
 			},
 		},
 	}
 
-	result, err := convertTraceResult(tr)
+	result, err := convertTraceResult(tr, testMeta())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -305,8 +295,8 @@ func TestConvertTraceResult(t *testing.T) {
 	if parsed.ID != "REQ-001" {
 		t.Errorf("expected ID REQ-001, got %s", parsed.ID)
 	}
-	if parsed.Depth != 0 {
-		t.Errorf("expected depth 0, got %d", parsed.Depth)
+	if parsed.Title != "Root Req" {
+		t.Errorf("expected title Root Req, got %q", parsed.Title)
 	}
 	if len(parsed.Children) != 1 {
 		t.Fatalf("expected 1 child, got %d", len(parsed.Children))
@@ -325,7 +315,7 @@ func TestConvertTraceResult(t *testing.T) {
 
 func TestConvertTraceResult_Nil(t *testing.T) {
 	t.Parallel()
-	node := convertTraceNode(nil)
+	node := convertTraceNode(nil, testMeta())
 	if node != nil {
 		t.Error("expected nil result for nil input")
 	}
@@ -339,7 +329,7 @@ func TestConvertPathSteps(t *testing.T) {
 		{ID: "CMP-001", Type: "component", Title: "End", Relation: "implements"},
 	}
 
-	result, err := convertPathSteps(steps)
+	result, err := convertPathSteps(steps, func(s tracer.PathStep) string { return s.Title })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -365,7 +355,7 @@ func TestConvertPathSteps(t *testing.T) {
 
 func TestConvertPathSteps_Empty(t *testing.T) {
 	t.Parallel()
-	result, err := convertPathSteps([]tracer.PathStep{})
+	result, err := convertPathSteps([]tracer.PathStep{}, func(tracer.PathStep) string { return "" })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -381,7 +371,7 @@ func TestBuildStoreRelations_NoEdges(t *testing.T) {
 	e := buildEntity(testutil.EntityFor(meta, "requirement").ID("REQ-001"))
 	seedEntity(t, st, e)
 
-	rels := buildStoreRelations(context.Background(), e.ID, st)
+	rels := buildStoreRelations(context.Background(), e.ID, st, meta)
 	if rels != nil {
 		t.Error("expected nil relations for entity with no edges")
 	}
@@ -397,7 +387,7 @@ func TestBuildStoreRelations_OutgoingOnly(t *testing.T) {
 	seedEntity(t, st, req)
 	seedRelation(t, st, sol.ID, "addresses", req.ID)
 
-	rels := buildStoreRelations(context.Background(), sol.ID, st)
+	rels := buildStoreRelations(context.Background(), sol.ID, st, meta)
 	if rels == nil {
 		t.Fatal("expected non-nil relations")
 	}
@@ -425,7 +415,7 @@ func TestBuildStoreRelations_IncomingOnly(t *testing.T) {
 	seedEntity(t, st, sol)
 	seedRelation(t, st, sol.ID, "addresses", req.ID)
 
-	rels := buildStoreRelations(context.Background(), req.ID, st)
+	rels := buildStoreRelations(context.Background(), req.ID, st, meta)
 	if rels == nil {
 		t.Fatal("expected non-nil relations")
 	}
@@ -450,7 +440,7 @@ func TestBuildStoreRelations_BothDirections(t *testing.T) {
 	seedRelation(t, st, "SOL-001", "addresses", "REQ-001")
 	seedRelation(t, st, "REQ-001", "motivates", "DEC-001")
 
-	rels := buildStoreRelations(context.Background(), "REQ-001", st)
+	rels := buildStoreRelations(context.Background(), "REQ-001", st, meta)
 	if rels == nil {
 		t.Fatal("expected non-nil relations")
 	}
@@ -475,15 +465,7 @@ func TestConvertStoreRelationsList(t *testing.T) {
 		{From: "CMP-001", Type: "implements", To: "SOL-001"},
 	}
 
-	result, err := convertStoreRelationsList(relations)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	var parsed []relationJSON
-	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	parsed := convertStoreRelationsList(relations)
 
 	if len(parsed) != 2 {
 		t.Fatalf("expected 2 relations, got %d", len(parsed))
@@ -501,11 +483,11 @@ func TestConvertStoreRelationsList(t *testing.T) {
 
 func TestConvertStoreRelationsList_Empty(t *testing.T) {
 	t.Parallel()
-	result, err := convertStoreRelationsList([]*entity.Relation{})
+	result, err := marshalJSON(convertStoreRelationsList([]*entity.Relation{}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(result, "[]") {
+	if result != "[]" {
 		t.Errorf("expected empty array, got %s", result)
 	}
 }
@@ -560,22 +542,8 @@ func TestMarshalJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(result, `"key": "value"`) {
+	if result != `{"key":"value"}` {
 		t.Errorf("expected JSON with key/value, got %s", result)
-	}
-}
-
-func TestMarshalJSON_Indented(t *testing.T) {
-	t.Parallel()
-	data := map[string]any{
-		"a": "b",
-	}
-	result, err := marshalJSON(data)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(result, "  ") {
-		t.Errorf("expected indented JSON, got %s", result)
 	}
 }
 
@@ -606,7 +574,7 @@ func TestConvertTraceResult_DeepNesting(t *testing.T) {
 		},
 	}
 
-	result, err := convertTraceResult(tr)
+	result, err := convertTraceResult(tr, testMeta())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -626,8 +594,8 @@ func TestConvertTraceResult_DeepNesting(t *testing.T) {
 	if grandchild.ID != "CMP-001" {
 		t.Errorf("expected grandchild ID CMP-001, got %s", grandchild.ID)
 	}
-	if grandchild.Depth != 2 {
-		t.Errorf("expected grandchild depth 2, got %d", grandchild.Depth)
+	if grandchild.Relation != "implements" {
+		t.Errorf("expected grandchild relation implements, got %s", grandchild.Relation)
 	}
 }
 
@@ -638,7 +606,7 @@ func TestConvertStoreEntity_WithProperties(t *testing.T) {
 	e := buildEntity(testutil.EntityFor(meta, "decision").ID("DEC-001").With("title", "Use Go").With("status", "accepted").With("priority", "high"))
 	seedEntity(t, st, e)
 
-	result, err := convertStoreEntity(context.Background(), e, st, false)
+	result, err := convertStoreEntity(context.Background(), e, st, meta, entityView{content: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

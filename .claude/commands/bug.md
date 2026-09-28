@@ -20,7 +20,7 @@ Using the rela MCP tools:
    - Link to affected concepts via `affects` relation
    - Link to feature via `fixes` relation
 
-3. Run `analyze_validations` to verify the bug is complete
+3. Run `analyze` (`check: validations`) to verify the bug is complete
 
 ## Step 2: Start Analysis
 

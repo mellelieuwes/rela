@@ -581,7 +581,7 @@ func (s *Services) ScheduledLuaWriteDeps() lua.WriteDeps {
 // candidate set comes from that same gated reader.
 //
 // This is the read bundle for an identity-bearing, non-HTTP consumer. The MCP
-// server is the caller: its handlers, resources, prompts, analyze and export
+// server is the caller: its handlers, resources, prompts and analyze
 // surfaces all read through the returned reader, so gating is decided once
 // here rather than per handler (DEC-ZBI39P).
 //
@@ -623,14 +623,19 @@ func (s *Services) GatedReads() GatedReadBundle {
 	deps.Tracer = tr
 	deps.Searcher = gatedSearcher(s.searcher, s.visibleSearcher, s.aclDeclarative, s.fieldRedactor, s.meta)
 
+	b, err := relresolve.NewStoreBinder(s.meta, gate, s.store)
+	if err != nil { // coverage-ignore: invariant: meta, gate and store are non-nil here
+		panic(fmt.Sprintf("appbuild: GatedReads: %v", err))
+	}
 	return GatedReadBundle{
 		Reader: gatedGraphReader{
 			rows: reader, raw: s.store, gateEndpoints: s.aclDeclarative != nil,
 		},
-		Tracer:    tr,
-		Validator: newValidator(reader, s.meta, deps, gate, s.store),
-		Searcher:  deps.Searcher,
-		LuaReads:  deps,
+		Tracer:     tr,
+		Validator:  newValidator(reader, s.meta, deps, gate, s.store),
+		Searcher:   deps.Searcher,
+		Traversals: b,
+		LuaReads:   deps,
 	}
 }
 
@@ -641,6 +646,9 @@ type GatedReadBundle struct {
 	Reader    GatedGraphReader
 	Tracer    tracer.Tracer
 	Validator validator.Validator
+
+	// Traversals answers `related(...)` under the same gate as Reader.
+	Traversals *relresolve.Binder
 
 	// Searcher gates hits by the principal's read scope, drops hits that
 	// matched only hidden properties, and clears the indexed title (see

@@ -1247,8 +1247,8 @@ other surfaces and how each counts hidden entities.
     to hidden entities fails with "entity has relations". That shows some
     hidden edge exists, but not how many or to what. The counts that
     `delete_entity` and `rename_entity` report cover visible edges only;
-  - `analyze_cardinality` and `analyze_orphans` use structural relation
-    counts, the same rule the data-entry analyze view follows.
+  - `analyze` with `check: cardinality` or `check: orphans` uses structural
+    relation counts, the same rule the data-entry analyze view follows.
 - **Markdown body (`content`) is not field-redacted, on any read path.**
   `visible:` is a **property-values** guard: it omits hidden *property* and
   *relation-meta* values from the wire. It makes no claim over the markdown

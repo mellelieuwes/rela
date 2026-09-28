@@ -11,20 +11,20 @@ If $ARGUMENTS is provided, analyze that specific entity. Otherwise, ask the user
 
 Run all analysis tools via rela MCP:
 
-1. **analyze_cardinality** - Check required relations
+1. **analyze** `check: cardinality` - Check required relations
    - tickets need `affects` and `implements`
    - bugs need `affects` and `fixes`
    - checklists need to be linked to their parent
 
-2. **analyze_orphans** - Find unlinked entities
+2. **analyze** `check: orphans` - Find unlinked entities
    - Checklists without parent tickets/bugs
    - Entities missing required connections
 
-3. **analyze_properties** - Validate property values
+3. **analyze** `check: properties` - Validate property values
    - Required properties present
    - Values match expected types/enums
 
-4. **analyze_validations** - Run custom validation rules
+4. **analyze** `check: validations` - Run custom validation rules
    - Status-specific requirements
    - Checklist completion rules
    - Skip reason validation

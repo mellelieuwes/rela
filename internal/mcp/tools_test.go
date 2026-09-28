@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -109,11 +110,7 @@ func TestHandleListEntities_All(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var entities []map[string]any
-	if err := json.Unmarshal([]byte(text), &entities); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	entities := decodeEntityPage(t, getResultText(t, result)).Entities
 	if len(entities) != 4 {
 		t.Errorf("expected 4 entities, got %d", len(entities))
 	}
@@ -127,11 +124,7 @@ func TestHandleListEntities_ByType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var entities []map[string]any
-	if err := json.Unmarshal([]byte(text), &entities); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	entities := decodeEntityPage(t, getResultText(t, result)).Entities
 	if len(entities) != 3 {
 		t.Errorf("expected 3 requirements, got %d", len(entities))
 	}
@@ -141,18 +134,14 @@ func TestHandleListEntities_WithFilter(t *testing.T) {
 	t.Parallel()
 	s := makeTestServer(t)
 	req := makeToolRequest(map[string]any{
-		"type":  "requirement",
-		"where": "status=accepted",
+		"type":   "requirement",
+		"filter": "entity.status == 'accepted'",
 	})
 	result, err := s.handleListEntities(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var entities []map[string]any
-	if err := json.Unmarshal([]byte(text), &entities); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	entities := decodeEntityPage(t, getResultText(t, result)).Entities
 	if len(entities) != 2 {
 		t.Errorf("expected 2 accepted requirements, got %d", len(entities))
 	}
@@ -169,14 +158,162 @@ func TestHandleListEntities_WithPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var entities []map[string]any
-	if err := json.Unmarshal([]byte(text), &entities); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	entities := decodeEntityPage(t, getResultText(t, result)).Entities
 	if len(entities) != 2 {
 		t.Errorf("expected 2 entities with limit=2 offset=1, got %d", len(entities))
 	}
+	if page := decodeEntityPage(t, getResultText(t, result)); page.Total != 4 || !page.HasMore {
+		t.Errorf("expected total 4 and has_more, got %+v", page)
+	}
+}
+
+func TestHandleListEntities_Errors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"unknown type", map[string]any{"type": "nonsense"}, "unknown entity type"},
+		{"filter without type", map[string]any{"filter": "entity.status == 'x'"}, "filter requires type"},
+		{"unknown property", map[string]any{"type": "requirement", "filter": "entity.nope == 'x'"}, "invalid filter"},
+		{"unknown related property", map[string]any{
+			"type": "decision", "filter": "related(entity, 'addresses', { nope = 'x' })",
+		}, "has no property"},
+		{"unknown relation", map[string]any{"type": "decision", "filter": "related(entity, 'nope')"}, "invalid filter"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := makeTestServer(t)
+			result, err := s.handleListEntities(context.Background(), makeToolRequest(tc.args))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			text := getResultText(t, result)
+			if !isErrorResult(result) || !strings.Contains(text, tc.want) {
+				t.Errorf("want error containing %q, got %s", tc.want, text)
+			}
+		})
+	}
+}
+
+func TestHandleListEntities_RelatedFilter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		filter string
+		want   []string
+	}{
+		{"has relation", "related(entity, 'addresses')", []string{"DEC-001"}},
+		{"target property matches", "related(entity, 'addresses', { status = 'accepted' })", []string{"DEC-001"}},
+		{"target property differs", "related(entity, 'addresses', { status = 'draft' })", nil},
+		{"negated", "not related(entity, 'addresses')", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := makeTestServer(t)
+			result, err := s.handleListEntities(context.Background(), makeToolRequest(map[string]any{
+				"type": "decision", "filter": tc.filter,
+			}))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if isErrorResult(result) {
+				t.Fatalf("unexpected error result: %s", getResultText(t, result))
+			}
+			var got []string
+			for _, e := range decodeEntityPage(t, getResultText(t, result)).Entities {
+				got = append(got, e.ID)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleListEntities_RelatedRefusedWithoutBinder pins the fallback: with
+// no traversal binder wired, a related(...) filter is an error, never an
+// ungated answer.
+func TestHandleListEntities_RelatedRefusedWithoutBinder(t *testing.T) {
+	t.Parallel()
+	meta, st := makeTestFixture(t)
+	deps := newTestDeps(t, meta, st)
+	deps.Traversals = nil
+	s := &Server{logger: slog.New(slog.DiscardHandler)}
+	setDeps(s, deps)
+
+	result, err := s.handleListEntities(context.Background(), makeToolRequest(map[string]any{
+		"type": "decision", "filter": "related(entity, 'addresses')",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text := getResultText(t, result); !isErrorResult(result) || !strings.Contains(text, "related(...) is not supported") {
+		t.Errorf("want a refusal, got %s", text)
+	}
+}
+
+func TestHandleListEntities_DisplayTitle(t *testing.T) {
+	t.Parallel()
+	meta := &metamodel.Metamodel{
+		Entities: map[string]metamodel.EntityDef{
+			"asset": {
+				IDPrefix:        "ASSET",
+				DisplayProperty: "naam",
+				Properties:      map[string]metamodel.PropertyDef{"naam": {Type: "string"}},
+			},
+		},
+	}
+	st := memstore.New()
+	e := &entity.Entity{ID: "ASSET-1", Type: "asset", Properties: map[string]any{"naam": "Hetzner"}}
+	if err := st.CreateEntity(context.Background(), e); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{logger: slog.New(slog.DiscardHandler)}
+	setDeps(srv, newTestDeps(t, meta, st))
+
+	result, err := srv.handleListEntities(context.Background(), &mcpgo.CallToolRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entities := decodeEntityPage(t, getResultText(t, result)).Entities
+	if len(entities) != 1 || entities[0].Title != "Hetzner" {
+		t.Errorf("summary did not resolve display_property: %+v", entities)
+	}
+}
+
+// entityPage and relationPage mirror the paged list results.
+type entityPage struct {
+	Total    int             `json:"total"`
+	HasMore  bool            `json:"has_more"`
+	Entities []entitySummary `json:"entities"`
+}
+
+type relationPage struct {
+	Total     int            `json:"total"`
+	HasMore   bool           `json:"has_more"`
+	Relations []relationJSON `json:"relations"`
+}
+
+func decodeEntityPage(t *testing.T, text string) entityPage {
+	t.Helper()
+	var p entityPage
+	if err := json.Unmarshal([]byte(text), &p); err != nil {
+		t.Fatalf("failed to parse JSON %s: %v", text, err)
+	}
+	return p
+}
+
+func decodeRelationPage(t *testing.T, text string) relationPage {
+	t.Helper()
+	var p relationPage
+	if err := json.Unmarshal([]byte(text), &p); err != nil {
+		t.Fatalf("failed to parse JSON %s: %v", text, err)
+	}
+	return p
 }
 
 func TestHandleShowEntity(t *testing.T) {
@@ -221,9 +358,8 @@ func TestHandleSearchEntities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var entities []map[string]any
-	if err := json.Unmarshal([]byte(text), &entities); err != nil {
+	var entities []entitySummary
+	if err := json.Unmarshal([]byte(getResultText(t, result)), &entities); err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
 	// Should match REQ-001, REQ-003, and DEC-001 (all have status=accepted)
@@ -243,9 +379,8 @@ func TestHandleSearchEntities_ByType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var entities []map[string]any
-	if err := json.Unmarshal([]byte(text), &entities); err != nil {
+	var entities []entitySummary
+	if err := json.Unmarshal([]byte(getResultText(t, result)), &entities); err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
 	// Only DEC-001 is a decision with "accepted"
@@ -506,7 +641,7 @@ func TestHandleUpdateEntity_SetAndOverwriteStillWorks(t *testing.T) {
 
 func TestUpdateEntityToolDescriptionMentionsNullDelete(t *testing.T) {
 	t.Parallel()
-	const phrase = "set a property to null"
+	const phrase = "null removes"
 	tool := toolUpdateEntity()
 	if !strings.Contains(strings.ToLower(tool.Description), phrase) {
 		t.Errorf("tool description should mention %q, got: %q", phrase, tool.Description)
@@ -572,11 +707,7 @@ func TestHandleListRelations_All(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var rels []relationJSON
-	if err := json.Unmarshal([]byte(text), &rels); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	rels := decodeRelationPage(t, getResultText(t, result)).Relations
 	if len(rels) != 1 {
 		t.Errorf("expected 1 relation, got %d", len(rels))
 	}
@@ -590,11 +721,7 @@ func TestHandleListRelations_ByType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var rels []relationJSON
-	if err := json.Unmarshal([]byte(text), &rels); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	rels := decodeRelationPage(t, getResultText(t, result)).Relations
 	if len(rels) != 1 {
 		t.Errorf("expected 1 addresses relation, got %d", len(rels))
 	}
@@ -608,11 +735,7 @@ func TestHandleListRelations_ByFrom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var rels []relationJSON
-	if err := json.Unmarshal([]byte(text), &rels); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	rels := decodeRelationPage(t, getResultText(t, result)).Relations
 	if len(rels) != 1 {
 		t.Errorf("expected 1 relation from DEC-001, got %d", len(rels))
 	}
@@ -621,14 +744,27 @@ func TestHandleListRelations_ByFrom(t *testing.T) {
 func TestHandleListRelations_NoMatch(t *testing.T) {
 	t.Parallel()
 	s := makeTestServer(t)
+	req := makeToolRequest(map[string]any{"to": "REQ-003"})
+	result, err := s.handleListRelations(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	page := decodeRelationPage(t, getResultText(t, result))
+	if page.Total != 0 || len(page.Relations) != 0 || page.HasMore {
+		t.Errorf("expected an empty page, got %+v", page)
+	}
+}
+
+func TestHandleListRelations_UnknownType(t *testing.T) {
+	t.Parallel()
+	s := makeTestServer(t)
 	req := makeToolRequest(map[string]any{"type": "implements"})
 	result, err := s.handleListRelations(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	if !strings.Contains(text, "[]") {
-		t.Errorf("expected empty array, got %s", text)
+	if !isErrorResult(result) {
+		t.Errorf("an unknown relation type must be an error, not an empty list: %s", getResultText(t, result))
 	}
 }
 
@@ -645,13 +781,12 @@ func TestHandleListRelations_Pagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var rels []relationJSON
-	if err := json.Unmarshal([]byte(text), &rels); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
+	rels := decodeRelationPage(t, getResultText(t, result)).Relations
 	if len(rels) != 1 {
 		t.Errorf("expected 1 relation with limit=1, got %d", len(rels))
+	}
+	if page := decodeRelationPage(t, getResultText(t, result)); page.Total != 2 || !page.HasMore {
+		t.Errorf("expected total 2 and has_more, got %+v", page)
 	}
 }
 
@@ -759,11 +894,11 @@ func TestHandleDeleteRelation_NotFound(t *testing.T) {
 
 // --- Trace handler tests ---
 
-func TestHandleTraceFrom(t *testing.T) {
+func TestHandleTrace(t *testing.T) {
 	t.Parallel()
 	s := makeTestServer(t)
 	req := makeToolRequest(map[string]any{"id": "REQ-001"})
-	result, err := group(s, selTrace).handleTraceFrom(context.Background(), req)
+	result, err := group(s, selTrace).handleTrace(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -773,11 +908,11 @@ func TestHandleTraceFrom(t *testing.T) {
 	}
 }
 
-func TestHandleTraceFrom_NotFound(t *testing.T) {
+func TestHandleTrace_NotFound(t *testing.T) {
 	t.Parallel()
 	s := makeTestServer(t)
 	req := makeToolRequest(map[string]any{"id": "NONEXISTENT"})
-	result, err := group(s, selTrace).handleTraceFrom(context.Background(), req)
+	result, err := group(s, selTrace).handleTrace(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -786,17 +921,30 @@ func TestHandleTraceFrom_NotFound(t *testing.T) {
 	}
 }
 
-func TestHandleTraceTo(t *testing.T) {
+func TestHandleTrace_Upstream(t *testing.T) {
 	t.Parallel()
 	s := makeTestServer(t)
-	req := makeToolRequest(map[string]any{"id": "REQ-001"})
-	result, err := group(s, selTrace).handleTraceTo(context.Background(), req)
+	req := makeToolRequest(map[string]any{"id": "REQ-001", "direction": "upstream"})
+	result, err := group(s, selTrace).handleTrace(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	text := getResultText(t, result)
-	if !strings.Contains(text, "REQ-001") {
-		t.Error("expected trace result to contain root ID")
+	if !strings.Contains(text, "REQ-001") || !strings.Contains(text, "DEC-001") {
+		t.Errorf("expected upstream trace from REQ-001 to reach DEC-001, got %s", text)
+	}
+}
+
+func TestHandleTrace_UnknownDirection(t *testing.T) {
+	t.Parallel()
+	s := makeTestServer(t)
+	req := makeToolRequest(map[string]any{"id": "REQ-001", "direction": "sideways"})
+	result, err := group(s, selTrace).handleTrace(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !isErrorResult(result) {
+		t.Errorf("expected an error for an unknown direction, got %s", getResultText(t, result))
 	}
 }
 
@@ -852,8 +1000,8 @@ func TestHandleAnalyzeOrphans(t *testing.T) {
 	}
 	text := getResultText(t, result)
 	// REQ-002, REQ-003 are orphans (no relations)
-	if !strings.Contains(text, "orphan") {
-		t.Errorf("expected orphan entities, got %s", text)
+	if !strings.Contains(text, `"check":"orphans","count":2`) {
+		t.Errorf("expected two orphan entities, got %s", text)
 	}
 }
 
@@ -901,7 +1049,7 @@ func TestHandleAnalyzeCardinality_WithViolation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	text := getResultText(t, result)
-	if !strings.Contains(text, "violation") {
+	if !strings.Contains(text, `"check":"cardinality"`) {
 		t.Errorf("expected violations, got %s", text)
 	}
 }
@@ -935,57 +1083,165 @@ func TestHandleAnalyzeValidations_NoRules(t *testing.T) {
 
 // --- Schema handler tests ---
 
-func TestHandleGetMetamodel(t *testing.T) {
+func TestHandleSchema_Overview(t *testing.T) {
 	t.Parallel()
 	s := makeTestServer(t)
-	result, err := group(s, selSchemaRes).handleGetSchema(context.Background(), &mcpgo.CallToolRequest{})
+	result, err := group(s, selSchemaRes).handleSchema(context.Background(), &mcpgo.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var parsed struct {
+		EntityTypes   []entityTypeSummary   `json:"entity_types"`
+		RelationTypes []relationTypeSummary `json:"relation_types"`
+	}
+	if err := json.Unmarshal([]byte(getResultText(t, result)), &parsed); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+	if len(parsed.EntityTypes) != 2 {
+		t.Errorf("expected 2 entity types, got %d", len(parsed.EntityTypes))
+	}
+	if len(parsed.RelationTypes) != 1 {
+		t.Errorf("expected 1 relation type, got %d", len(parsed.RelationTypes))
+	}
+	for _, et := range parsed.EntityTypes {
+		if et.Name == "requirement" && et.Count != 3 {
+			t.Errorf("requirement count = %d, want 3", et.Count)
+		}
+	}
+}
+
+func TestHandleSchema_EntityType(t *testing.T) {
+	t.Parallel()
+	s := makeTestServer(t)
+	req := makeToolRequest(map[string]any{"type": "requirements"})
+	result, err := group(s, selSchemaRes).handleSchema(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	text := getResultText(t, result)
-	var parsed map[string]any
+	var parsed entityTypeDetail
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
-	if parsed["entities"] == nil {
-		t.Error("expected entities in metamodel output")
+	if parsed.Name != "requirement" {
+		t.Errorf("plural type name not resolved: %s", parsed.Name)
 	}
-	if parsed["relations"] == nil {
-		t.Error("expected relations in metamodel output")
+	if !parsed.Properties["title"].Required {
+		t.Errorf("title should be required: %s", text)
 	}
-}
-
-func TestHandleListEntityTypes(t *testing.T) {
-	t.Parallel()
-	s := makeTestServer(t)
-	result, err := group(s, selSchemaRes).handleListEntityTypes(context.Background(), &mcpgo.CallToolRequest{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if len(parsed.Incoming) != 1 || parsed.Incoming[0].Relation != "addresses" {
+		t.Errorf("expected incoming addresses relation, got %+v", parsed.Incoming)
 	}
-	text := getResultText(t, result)
-	var types []map[string]any
-	if err := json.Unmarshal([]byte(text), &types); err != nil {
-		t.Fatalf("failed to parse JSON: %v", err)
-	}
-	if len(types) != 2 {
-		t.Errorf("expected 2 entity types, got %d", len(types))
+	// Zero-valued fields must not be serialized; that is what made the old
+	// list_entity_types answer unusably large.
+	if strings.Contains(text, "ScanCmd") || strings.Contains(text, `"list":false`) {
+		t.Errorf("schema detail serializes zero values: %s", text)
 	}
 }
 
-func TestHandleListRelationTypes(t *testing.T) {
+func TestHandleSchema_RelationType(t *testing.T) {
 	t.Parallel()
 	s := makeTestServer(t)
-	result, err := group(s, selSchemaRes).handleListRelationTypes(context.Background(), &mcpgo.CallToolRequest{})
+	req := makeToolRequest(map[string]any{"type": "addresses"})
+	result, err := group(s, selSchemaRes).handleSchema(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	text := getResultText(t, result)
-	var types []map[string]any
-	if err := json.Unmarshal([]byte(text), &types); err != nil {
+	var parsed relationTypeDetail
+	if err := json.Unmarshal([]byte(getResultText(t, result)), &parsed); err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
-	if len(types) != 1 {
-		t.Errorf("expected 1 relation type, got %d", len(types))
+	if parsed.Name != "addresses" || parsed.Count != 1 {
+		t.Errorf("unexpected relation detail: %+v", parsed)
+	}
+}
+
+func TestHandleSchema_UnknownType(t *testing.T) {
+	t.Parallel()
+	s := makeTestServer(t)
+	req := makeToolRequest(map[string]any{"type": "nonsense"})
+	result, err := group(s, selSchemaRes).handleSchema(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !isErrorResult(result) {
+		t.Errorf("expected an error for an unknown type, got %s", getResultText(t, result))
+	}
+}
+
+// TestHandleSchema_ExactNameBeforePlural pins the lookup order: a relation
+// named like a plural of an entity type resolves to the relation.
+func TestHandleSchema_ExactNameBeforePlural(t *testing.T) {
+	t.Parallel()
+	meta := &metamodel.Metamodel{
+		Entities: map[string]metamodel.EntityDef{
+			"test": {IDPrefix: "T", Properties: map[string]metamodel.PropertyDef{"title": {Type: "string"}}},
+		},
+		Relations: map[string]metamodel.RelationDef{
+			"tests": {From: []string{"test"}, To: []string{"test"}},
+		},
+		Validations: []metamodel.ValidationRule{
+			{Name: "global-rule"},
+			{Name: "other-type", EntityType: "elsewhere", Description: "not for test"},
+		},
+	}
+	srv := &Server{logger: slog.New(slog.DiscardHandler)}
+	setDeps(srv, newTestDeps(t, meta, memstore.New()))
+
+	result, err := group(srv, selSchemaRes).handleSchema(context.Background(), makeToolRequest(map[string]any{"type": "tests"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var rel relationTypeDetail
+	if jsonErr := json.Unmarshal([]byte(getResultText(t, result)), &rel); jsonErr != nil || rel.From == nil {
+		t.Errorf("tests should resolve to the relation, got %s", getResultText(t, result))
+	}
+
+	// A rule with no entity type applies to every type, and a rule with no
+	// description is listed by name.
+	result, err = group(srv, selSchemaRes).handleSchema(context.Background(), makeToolRequest(map[string]any{"type": "test"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var detail entityTypeDetail
+	if err := json.Unmarshal([]byte(getResultText(t, result)), &detail); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+	if !slices.Equal(detail.Validations, []string{"global-rule"}) {
+		t.Errorf("validations = %v, want [global-rule]", detail.Validations)
+	}
+}
+
+func TestHandleListEntities_NonPositiveLimitUsesDefault(t *testing.T) {
+	t.Parallel()
+	s := makeTestServer(t)
+	for _, limit := range []float64{0, -1} {
+		result, err := s.handleListEntities(context.Background(), makeToolRequest(map[string]any{"limit": limit}))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// The fixture has 4 entities, under the default of 50; the point is
+		// that the call succeeds and returns the page rather than erroring.
+		if page := decodeEntityPage(t, getResultText(t, result)); len(page.Entities) != page.Total {
+			t.Errorf("limit %v: got %d of %d", limit, len(page.Entities), page.Total)
+		}
+	}
+	if got := limitArg(newToolRequest(makeToolRequest(map[string]any{"limit": float64(-5)})), 7); got != 7 {
+		t.Errorf("limitArg(-5) = %d, want the default 7", got)
+	}
+}
+
+func TestServerInstructions(t *testing.T) {
+	t.Parallel()
+	meta := &metamodel.Metamodel{Entities: map[string]metamodel.EntityDef{
+		"ticket10": {}, "ticket2": {}, "bug": {},
+	}}
+	got := serverInstructions(meta)
+	if !strings.Contains(got, "Entity types: bug, ticket2, ticket10.") {
+		t.Errorf("types missing or not in natural order: %s", got)
+	}
+	if empty := serverInstructions(&metamodel.Metamodel{}); strings.Contains(empty, "Entity types") {
+		t.Errorf("empty metamodel should list no types: %s", empty)
 	}
 }
 

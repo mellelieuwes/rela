@@ -4,8 +4,8 @@
 // The server exposes rela's capabilities to AI assistants:
 //
 //   - Tools for entity/relation CRUD, graph trace/path, analysis (orphans,
-//     cardinality, properties, validations, schema), schema introspection,
-//     export, and Lua execution. Registered in tools.go (grep AddTool).
+//     cardinality, properties, validations, unique, schema usage), schema
+//     introspection, and Lua execution. Registered in tools.go (grep AddTool).
 //   - Resources: rela://metamodel, rela://entity/{type}/{id},
 //     rela://relation/{from}/{type}/{to}
 //   - Prompts: analyze-traceability, review-orphans, summarize-project,
@@ -26,6 +26,7 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -33,6 +34,8 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/lua"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
+	"github.com/Sourcehaven-BV/rela/internal/natsort"
+	"github.com/Sourcehaven-BV/rela/internal/predicate"
 	"github.com/Sourcehaven-BV/rela/internal/principal"
 	"github.com/Sourcehaven-BV/rela/internal/search"
 	"github.com/Sourcehaven-BV/rela/internal/store"
@@ -53,7 +56,7 @@ import (
 // `*project.Context` keeps that type from leaking into MCP test stubs.
 type Deps struct {
 	// Store is the READ handle for every MCP read surface — tools,
-	// resources, prompts, export and analyze alike. It is deliberately
+	// resources, prompts and analyze alike. It is deliberately
 	// the narrow [GraphReader], not `store.Store`: writes go through
 	// EntityManager, so MCP never needs the wide composite, and typing
 	// the field this way makes an ungated raw read *unavailable* rather
@@ -67,6 +70,7 @@ type Deps struct {
 	// Either way the handlers are identical; gating is entirely a wiring
 	// decision (DEC-ZBI39P).
 	Store         GraphReader
+	Traversals    TraversalBinder
 	Meta          *metamodel.Metamodel
 	Tracer        tracer.Tracer
 	Searcher      search.Searcher
@@ -105,6 +109,17 @@ type GraphReader interface {
 	ListEntities(ctx context.Context, q store.EntityQuery) iter.Seq2[*entity.Entity, error]
 	GetRelation(ctx context.Context, from, relType, to string) (*entity.Relation, error)
 	ListRelations(ctx context.Context, q store.RelationQuery) iter.Seq2[*entity.Relation, error]
+}
+
+// TraversalBinder answers the `related(...)` calls of a list_entities filter
+// for a page of candidate rows. The wiring site supplies one whose gate
+// matches [Deps.Store]: an ungated binder behind a gated reader would reveal
+// edges to hidden entities. Nil: accepted — list_entities then refuses a
+// filter that contains a traversal.
+type TraversalBinder interface {
+	Bind(
+		ctx context.Context, entityType string, ids []string, progs ...*predicate.Program,
+	) (func(rowID string) predicate.TraversalFunc, error)
 }
 
 // GraphCounter is the structural half of [GraphReader]: type-level tallies
@@ -146,7 +161,7 @@ type EntityWriter interface {
 
 // validate rejects a Deps missing any field whose zero value would
 // defer a failure to request time — a nil collaborator panics inside a
-// tool handler, and an empty ProjectRoot makes lua_list silently walk
+// tool handler, and an empty ProjectRoot makes lua_run's script listing silently walk
 // the process CWD instead of the project's scripts/ dir. Catching these
 // at construction keeps the failure where it can be diagnosed.
 //
@@ -242,7 +257,7 @@ type Server struct {
 	logger    *slog.Logger
 	principal principal.Principal
 
-	// luaTools registers lua_eval / lua_run / lua_list. Off unless the wiring
+	// luaTools registers lua_eval / lua_run. Off unless the wiring
 	// asks for it with [WithLuaTools]; see that option for why.
 	luaTools bool
 
@@ -310,7 +325,6 @@ func group[G any](s *Server, sel func(handlerSet) G) G {
 // Selectors for the handler groups, used with [group] and [bind].
 func selTypes(h handlerSet) typeResolver              { return h.types }
 func selTrace(h handlerSet) traceHandler              { return h.trace }
-func selExport(h handlerSet) exportHandler            { return h.export }
 func selLua(h handlerSet) luaHandler                  { return h.lua }
 func selSchemaRes(h handlerSet) schemaResourceHandler { return h.schemaRes }
 func selPrompts(h handlerSet) promptHandler           { return h.prompts }
@@ -328,7 +342,6 @@ func selPrompts(h handlerSet) promptHandler           { return h.prompts }
 type handlerSet struct {
 	types     typeResolver
 	trace     traceHandler
-	export    exportHandler
 	lua       luaHandler
 	schemaRes schemaResourceHandler
 	prompts   promptHandler
@@ -342,8 +355,7 @@ func (d Deps) handlers() handlerSet {
 	types := typeResolver{meta: d.Meta}
 	return handlerSet{
 		types:     types,
-		trace:     traceHandler{store: d.Store, tracer: d.Tracer},
-		export:    exportHandler{store: d.Store, types: types},
+		trace:     traceHandler{store: d.Store, tracer: d.Tracer, meta: d.Meta},
 		lua:       luaHandler{writeDeps: d.LuaWriteDeps, cache: d.LuaCache, projectRoot: d.ProjectRoot},
 		schemaRes: schemaResourceHandler{store: d.Store, meta: d.Meta},
 		prompts:   promptHandler{store: d.Store, meta: d.Meta, tracer: d.Tracer, types: types},
@@ -363,8 +375,8 @@ func WithPrincipal(p principal.Principal) Option {
 	return func(s *Server) { s.principal = p }
 }
 
-// WithLuaTools registers the Lua scripting tools (lua_eval, lua_run,
-// lua_list). Only the stdio wiring passes it.
+// WithLuaTools registers the Lua scripting tools (lua_eval,
+// lua_run). Only the stdio wiring passes it.
 //
 // Opt-in because a script is caller-supplied code that runs in the server
 // process. Over stdio the caller already controls the machine. Over HTTP it
@@ -437,14 +449,7 @@ func NewServer(deps Deps, version string, opts ...Option) (*Server, error) {
 	mcpServer := mcpgo.NewServer(
 		&mcpgo.Implementation{Name: "rela", Version: version},
 		&mcpgo.ServerOptions{
-			Instructions: "rela is a schema-driven entity-graph platform. The domain is defined by a " +
-				"YAML metamodel (entity types, relation types, properties, validation rules); " +
-				"entities and relations are stored as markdown files with YAML frontmatter. " +
-				"Traceability is one common use case, not the only one — the graph can model " +
-				"requirements, compliance controls, project plans, issue trackers, " +
-				"knowledge bases, or any typed-entity-and-relation domain. " +
-				"Use tools to query, create, update, and delete entities and relations. " +
-				"Use resources to read entity and metamodel data directly.",
+			Instructions: serverInstructions(deps.Meta),
 		},
 	)
 
@@ -456,6 +461,33 @@ func NewServer(deps Deps, version string, opts ...Option) (*Server, error) {
 	s.registerPrompts()
 
 	return s, nil
+}
+
+// serverInstructions builds the MCP instructions: what this graph holds and
+// the conventions several tools share. The conventions live here, once,
+// rather than in each tool description, because instructions are sent once
+// per session and descriptions are sent per tool.
+//
+// The entity type list tells the agent what domain this server covers, so it
+// can decide whether the tools are relevant at all without spending a call.
+// It is built at construction: a schema hot-reload (TKT-NU247U) does not
+// renegotiate the session, so a type added later appears in the schema tool
+// but not here.
+func serverInstructions(meta *metamodel.Metamodel) string {
+	types := meta.EntityTypes()
+	natsort.Strings(types)
+	var b strings.Builder
+	b.WriteString("rela graph of typed entities and relations, defined by a schema. ")
+	if len(types) > 0 {
+		b.WriteString("Entity types: ")
+		b.WriteString(strings.Join(types, ", "))
+		b.WriteString(". ")
+	}
+	b.WriteString("Call schema (optionally with a type) before creating entities or filtering. " +
+		"Entity summaries carry a title resolved from the type's display property. " +
+		"Write results start with `WARNINGS (n):` when soft validation failed; the write still succeeded. " +
+		"In update_entity, a null property value removes the property; an empty string is ignored.")
+	return b.String()
 }
 
 // HTTPHandler returns an http.Handler serving this server over Streamable

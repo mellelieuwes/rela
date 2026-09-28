@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -81,5 +83,32 @@ func TestHandleLuaEval_PreservesIsErrorFlag(t *testing.T) {
 		luaCallToolReq(map[string]any{"code": "error('x')"}))
 	if !result.IsError {
 		t.Error("IsError flag must remain true on Lua failure for MCP clients to branch")
+	}
+}
+
+// TestHandleLuaRun_ListsScriptsWithoutPath pins that lua_run with no path
+// lists the scripts, which replaced the lua_list tool.
+func TestHandleLuaRun_ListsScriptsWithoutPath(t *testing.T) {
+	t.Parallel()
+	meta, st := makeTestFixture(t)
+	deps := newTestDeps(t, meta, st)
+	if err := os.MkdirAll(filepath.Join(deps.ProjectRoot, "scripts", "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"reports/weekly.lua", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(deps.ProjectRoot, "scripts", name), []byte("return 1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &Server{}
+	setDeps(s, deps)
+
+	result, err := group(s, selLua).handleLuaRun(context.Background(), luaCallToolReq(map[string]any{}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := getResultText(t, result)
+	if result.IsError || !strings.Contains(text, filepath.Join("reports", "weekly.lua")) || strings.Contains(text, "notes.txt") {
+		t.Errorf("want only the .lua script listed, got: %s", text)
 	}
 }

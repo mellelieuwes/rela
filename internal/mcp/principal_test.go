@@ -26,7 +26,7 @@ func TestNewServer_RejectsZeroPrincipal(t *testing.T) {
 // Deps missing any required field, with a valid Principal supplied so
 // the Deps validation (not the Principal gate) is what fails. A zero
 // field deferred to request time would either nil-deref in a handler or
-// — for ProjectRoot — make lua_list silently walk the process CWD.
+// — for ProjectRoot — make lua_run's script listing silently walk the process CWD.
 func TestNewServer_RejectsIncompleteDeps(t *testing.T) {
 	t.Parallel()
 	withPrincipal := WithPrincipal(principal.Principal{User: "test", Tool: principal.ToolMCP})

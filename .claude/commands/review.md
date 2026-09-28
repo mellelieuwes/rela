@@ -59,6 +59,6 @@ Once all checks pass:
 1. Mark review checklist as `done`
 2. Mark docs checklist as `done` (if applicable)
 3. Transition ticket/bug to `done`
-4. Run `analyze_validations` to verify completion
+4. Run `analyze` (`check: validations`) to verify completion
 
 Output a summary of what was completed and any notes for the user.

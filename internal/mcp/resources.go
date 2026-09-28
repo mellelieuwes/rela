@@ -96,7 +96,7 @@ func (h schemaResourceHandler) handleReadEntity(
 		return nil, fmt.Errorf("entity %s is type %s, not %s", id, e.Type, entityType)
 	}
 
-	text, err := convertStoreEntity(ctx, e, st, true)
+	text, err := convertStoreEntity(ctx, e, st, h.meta, entityView{relations: true, content: true})
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert entity: %w", err)
 	}

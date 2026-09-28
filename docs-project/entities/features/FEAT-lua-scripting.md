@@ -16,7 +16,7 @@ generate reports, perform bulk operations, and export data to custom formats.
 - **Mutation Operations**: Create, update, delete entities and relations
 - **Schema Introspection**: Access entity types, relation types, and property definitions
 - **Output**: JSON output to stdout, file writing to `output/` directory
-- **MCP Integration**: Execute scripts via `lua_eval`, `lua_run`, and `lua_list` tools
+- **MCP Integration**: Execute scripts via the `lua_eval` and `lua_run` tools
 
 ## Security Model
 

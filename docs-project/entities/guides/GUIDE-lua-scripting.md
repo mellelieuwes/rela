@@ -2080,8 +2080,7 @@ Lua scripting is available via MCP tools:
 | Tool | Description |
 |------|-------------|
 | `lua_eval` | Execute inline Lua code |
-| `lua_run` | Execute a script from `scripts/` |
-| `lua_list` | List available scripts |
+| `lua_run` | Execute a script from `scripts/`, or list them when `path` is omitted |
 
 ### lua_eval
 
@@ -2098,10 +2097,6 @@ Execute a script file with arguments:
 ```text
 lua_run(path: "report.lua", args: ["2024-Q1"])
 ```
-
-### lua_list
-
-List available scripts in `scripts/` directory.
 
 ## Validation Rules
 

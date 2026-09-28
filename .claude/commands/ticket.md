@@ -21,8 +21,8 @@ Using the rela MCP tools (rela-issues-and-design-tickets):
    - Link to feature via `implements` relation
 
 3. Run ALL analyze tools to verify the ticket is complete:
-   - `analyze_cardinality`
-   - `analyze_validations`
+   - `analyze` (`check: cardinality`)
+   - `analyze` (`check: validations`)
    - Fix any violations before proceeding
 
 ## Step 2: Planning Phase
@@ -140,7 +140,7 @@ Transition ticket to `review`. **Automation will create review-checklist automat
 3. Run `/verify {ticket-id}` to confirm readiness
 4. Mark review checklist as `done`
 5. Transition ticket to `done`
-6. Run `analyze_validations` - must pass with no errors
+6. Run `analyze` (`check: validations`) - must pass with no errors
 7. Commit with a message that explains WHY, not just WHAT
 
 ## Key Principles

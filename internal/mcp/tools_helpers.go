@@ -13,7 +13,7 @@ import (
 
 // typeResolver maps user-supplied type names onto metamodel entity types —
 // alias resolution, plural stripping, and property-name validation shared by
-// the entity, analysis, export, and prompt handlers.
+// the entity, analysis and prompt handlers.
 //
 // A type of its own rather than more methods on [Server] (the urlHelpers
 // pattern, TKT-YUETL7): these helpers need exactly one thing from the server —
@@ -136,7 +136,7 @@ func filterProperties(props map[string]any, keepNil bool) map[string]any {
 // Reports unknown property names and rejects nil values targeting required properties
 // (a nil value means "delete" in update_entity; deleting a required property would leave
 // the entity invalid, so we surface that as an actionable error rather than a misleading
-// success that analyze_validations later catches).
+// success that `analyze check=validations` later catches).
 func (r typeResolver) validatePropertyNames(entityType string, properties map[string]any) *mcpgo.CallToolResult {
 	if properties == nil {
 		return nil
@@ -186,6 +186,16 @@ func (r typeResolver) validatePropertyNames(entityType string, properties map[st
 	}
 
 	return nil
+}
+
+// limitArg reads the `limit` argument. Zero or a negative value means the
+// default, never "no limit": an unbounded answer is the cost the default
+// exists to cap.
+func limitArg(args toolRequest, def int) int {
+	if limit := args.GetInt("limit", def); limit > 0 {
+		return limit
+	}
+	return def
 }
 
 func applyPagination[T any](items []T, offset, limit int) []T {

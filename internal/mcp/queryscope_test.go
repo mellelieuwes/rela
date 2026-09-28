@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"testing"
 
@@ -70,16 +69,9 @@ func TestHandleListEntities_IgnoresQueryScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleListEntities: %v", err)
 	}
-	var got []map[string]any
-	if err := json.Unmarshal([]byte(getResultText(t, result)), &got); err != nil {
-		t.Fatalf("parse result: %v", err)
-	}
-
 	ids := map[string]bool{}
-	for _, e := range got {
-		if id, ok := e["id"].(string); ok {
-			ids[id] = true
-		}
+	for _, e := range decodeEntityPage(t, getResultText(t, result)).Entities {
+		ids[e.ID] = true
 	}
 	if !ids["TAAK-2"] {
 		t.Fatalf("MCP list_entities dropped the archived row, so the schema's default "+
