@@ -7,11 +7,11 @@ behind a scenario, the GitHub issue behind a ticket. The **pact** is the
 contract between an entity type and that system: which fields the other side
 owns, which both sides edit, and how the two map onto each other.
 
-rela never talks to the other system. An **agent** does: a program or an AI
-assistant with its own credentials and tools, which reads the external item,
-translates it into rela's fields, and hands the result to `rela twin`. rela
-holds the pact, every twin, and the values both sides agreed on at the last
-sync. It enforces field ownership on every write path it controls.
+In this stage rela does not talk to the other system itself. An **agent** does:
+a program or an AI assistant with its own credentials and tools, which reads the
+external item, translates it into rela's fields, and hands the result to `rela
+twin`. rela holds the pact, every twin, and the values both sides agreed on at
+the last sync. It enforces field ownership on every write path it controls.
 
 Integration = pacts + twins. This guide covers both, the loop an agent runs,
 what each state and finding means, and exactly where ownership is enforced.
@@ -32,13 +32,13 @@ the rest of the data's rules live, for three reasons:
   a sync that crashes, an agent that is replaced, or a run on another day
   starts from the same facts.
 
-### Why rela never calls the external system
+### Why this stage leaves the external calls to the agent
 
 The transport is the part of an integration that changes most and generalizes
 least: authentication, API versions, pagination, rate limits, retries, and the
 translation itself (Basecamp's rich-text HTML to markdown, a workflow's column
 names to your enum). An agent handles all of that well and differently for
-every system. rela handles none of it.
+every system, so in this stage rela leaves it to the agent.
 
 That split has consequences worth stating:
 
@@ -51,6 +51,9 @@ That split has consequences worth stating:
   external items is the agent's job (see [the agent loop](#the-agent-loop)).
 - **Nothing happens on its own.** There is no background sync, no polling and
   no webhook receiver for twins. Something has to run the agent.
+
+This is a choice for this stage, not a principle: built-in connectors could be
+added later on top of the same pacts and twins, without changing the contract.
 
 ## Declaring a pact
 

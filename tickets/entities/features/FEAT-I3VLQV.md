@@ -12,7 +12,7 @@ status: in-progress
 
 A business-modelling tool is only as useful as its connection to the systems
 where work actually happens. The entities rela models — scenarios, issues,
-risks, controls — usually also live somewhere else: a Basecamp todo, a GitHub
+risks, controls — oftentimes also live somewhere else: a Basecamp todo, a GitHub
 issue, a Jira ticket. Today every integration models that "somewhere else" on
 its own terms: CalDAV has `read_only:` field locks, the fs↔pg sync channel has
 its own hash index, a webhook has no memory at all. Nothing in rela can say
@@ -30,12 +30,12 @@ external collection) and free-text instructions describing how both sides map.
 (`in_sync`, `pending`, `conflict`, `gone`), and the agreed base of the last
 sync.
 
-rela never talks to an external system. The transport is whoever runs the sync —
-in the design case an AI agent using the external system's own CLI, reading the
-Pact as its brief. rela is the ground truth for the integration itself: it holds
-the contract and the state, reconciles deterministically against the base, and
-enforces ownership — a `theirs` field of a twinned entity cannot be edited in
-rela except through the sync path.
+In this proposal rela does not talk to an external system itself. The transport
+is whoever runs the sync — in the design case an AI agent using the external
+system's own CLI, reading the Pact as its brief. rela is the ground truth for
+the integration itself: it holds the contract and the state, reconciles
+deterministically against the base, and enforces ownership — a `theirs` field of
+a twinned entity cannot be edited in rela except through the sync path.
 
 ## Stages
 

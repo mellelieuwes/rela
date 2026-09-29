@@ -2,12 +2,12 @@
 // Basecamp todo, a GitHub issue — and the agreed state of the last sync with
 // each of them.
 //
-// rela never calls an external system. An agent does, with its own tools, and
-// reports what it read ([Service.Pull]) or wrote ([Service.Pushed]). rela holds
-// the contract (the metamodel's pact: which side owns which field), every
-// [Twin], and the agreed [Snapshot] of the last sync, and it enforces field
-// ownership on the rela side ([Service.OwnedFields] feeds entitymanager's
-// write guard).
+// rela does not call an external system itself (not in this stage). An agent
+// does, with its own tools, and reports what it read ([Service.Pull]) or wrote
+// ([Service.Pushed]). rela holds the contract (the metamodel's pact: which side
+// owns which field), every [Twin], and the agreed [Snapshot] of the last sync,
+// and it enforces field ownership on the rela side ([Service.OwnedFields] feeds
+// entitymanager's write guard).
 //
 // # Why this is not in the graph
 //

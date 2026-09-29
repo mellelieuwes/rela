@@ -850,8 +850,8 @@ rela sync pull --force TKT-42  # resolve TKT-42: remote wins
 ### rela twin
 
 Manage twins: an entity's counterparts in external systems, kept in sync by an
-agent that talks to the external system with its own tools. rela never calls
-the external system. Requires a `pacts:` block in the metamodel. See
+agent that talks to the external system with its own tools; in this stage rela
+does not call the external system itself. Requires a `pacts:` block in the metamodel. See
 [Twins](twins.md) for the full design and a worked example.
 
 ```bash

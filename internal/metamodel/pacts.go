@@ -16,13 +16,13 @@ import (
 // between rela and one external system (Basecamp, GitHub, …) that holds a
 // counterpart — a Twin — of each entity of that type.
 //
-// It declares FIELD OWNERSHIP, nothing else. rela never calls the external
-// system; an agent does, with its own tools. The pact tells that agent (and
-// rela's write guard) which fields the external side owns (Theirs), which
-// both sides edit (Shared), and for which of rela's own fields a foreign edit
-// is to be proposed rather than reverted (Propose). Every field not in Theirs
-// or Shared is ours, and a computed property is always ours: rela derives it,
-// so no other side can own it.
+// It declares FIELD OWNERSHIP, nothing else. rela does not call the external
+// system itself (not in this stage); an agent does, with its own tools. The
+// pact tells that agent (and rela's write guard) which fields the external side
+// owns (Theirs), which both sides edit (Shared), and for which of rela's own
+// fields a foreign edit is to be proposed rather than reverted (Propose). Every
+// field not in Theirs or Shared is ours, and a computed property is always
+// ours: rela derives it, so no other side can own it.
 //
 // A field is a declared property name of the entity type, or [PactBodyField]
 // for the markdown content. Relations are not fields.

@@ -22,8 +22,9 @@ import (
 )
 
 // TwinCmd is the `rela twin` command group: the agent's interface to twins,
-// an entity's counterparts in external systems. rela never calls the external
-// system; the agent reads and writes it with its own tools and reports here.
+// an entity's counterparts in external systems. rela does not call the
+// external system itself (not in this stage); the agent reads and writes it
+// with its own tools and reports here.
 // See the twins package doc for the sync loop these verbs drive.
 //
 // Every verb runs under the operator's user with the tool stamped as

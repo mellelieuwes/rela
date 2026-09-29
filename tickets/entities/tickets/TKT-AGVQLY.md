@@ -25,10 +25,10 @@ log, `/_schema` entity lists, search and analysis. The writes a sync makes *to
 the entity* do go through `entitymanager` and are validated, gated and audited
 like any other write.
 
-rela never calls an external system. That keeps credentials, rate limits and the
-lossy translation between two data models with the party that owns them, and
-leaves rela the part only it can do: the contract, the state and the
-enforcement.
+In this stage rela does not call an external system itself. That keeps
+credentials, rate limits and the lossy translation between two data models with
+the party that owns them, and leaves rela the part only it can do: the contract,
+the state and the enforcement.
 
 ## Scope
 
