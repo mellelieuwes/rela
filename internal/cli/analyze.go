@@ -229,6 +229,9 @@ func (c *AnalyzeGapsCmd) Run(ctx context.Context, analyzer *analysis.Service) er
 		for _, gap := range allGaps {
 			out.WriteWarning("Gaps in %s sequence:", gap.Prefix)
 			out.WriteMessage("  Missing: %s", strings.Join(gap.Missing, ", "))
+			if gap.Unlisted > 0 {
+				out.WriteMessage("  … and %d more", gap.Unlisted)
+			}
 		}
 	}
 	return reportPartialScan(scanErr)

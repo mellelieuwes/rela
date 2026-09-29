@@ -60,10 +60,19 @@ type UniqueViolation struct {
 }
 
 // GapResult contains gaps in an ID sequence.
+//
+// Missing lists at most [maxListedGaps] IDs; Unlisted counts the rest. A gap
+// is a range, so its size is known without naming every ID in it, and one
+// stray large number (REQ-1000000 next to REQ-001) must not cost a million
+// strings.
 type GapResult struct {
-	Prefix  string
-	Missing []string
+	Prefix   string
+	Missing  []string
+	Unlisted int `json:"Unlisted,omitempty"`
 }
+
+// maxListedGaps caps how many missing IDs one sequence names.
+const maxListedGaps = 100
 
 // CardinalityViolation re-exports schema.CardinalityViolation so CLI
 // consumers don't need to import internal/schema directly.
@@ -284,34 +293,32 @@ func (s *Service) FindUniqueViolations(ctx context.Context, opts Options) ([]Uni
 
 // --- Gap analysis ---
 
-// FindGaps returns gaps in ID sequences, filtered by scope. Excludes
-// entity types with manual (string) IDs.
+// FindGaps returns gaps in ID sequences, filtered by scope. Only entities of a
+// type whose IDs rela numbers can have a gap: manual-ID types are excluded by
+// the entity's TYPE. Excluding them by the declared id_prefix does not work,
+// because the prefix parsed from an ID is the longest letters-and-dashes run
+// before the digits: a manual id `tw-basecamp-10098661922` parses to
+// `tw-basecamp-`, never to the declared `tw-`.
 // Deliberately the default query, not allStatesQuery: a gap is "this entity is
 // missing an expected link", asked once per entity. Reporting the same gap once
 // per state would be noise, not coverage.
 func (s *Service) FindGaps(ctx context.Context, opts Options) ([]GapResult, error) {
 	meta := s.deps.Meta
-	stringIDPrefixes := make(map[string]bool)
-	for _, entityDef := range meta.Entities {
+	manualTypes := make(map[string]bool)
+	for typeName, entityDef := range meta.Entities {
 		if entityDef.IsManualID() {
-			for _, idPrefix := range entityDef.GetIDPrefixes() {
-				prefix := strings.TrimSuffix(idPrefix, "-")
-				stringIDPrefixes[prefix] = true
-			}
+			manualTypes[typeName] = true
 		}
 	}
 
 	collected, scanErr := collectEntities(ctx, s.deps.Store, store.EntityQuery{})
 	prefixGroups := make(map[string][]int)
 	for _, e := range collected {
-		if !inScope(e.ID, opts.Scope) {
+		if !inScope(e.ID, opts.Scope) || manualTypes[e.Type] {
 			continue
 		}
 		parsed, err := entity.ParseEntityID(e.ID)
 		if err != nil || parsed.Prefix == "" {
-			continue
-		}
-		if stringIDPrefixes[strings.TrimSuffix(parsed.Prefix, "-")] {
 			continue
 		}
 		prefixGroups[parsed.Prefix] = append(prefixGroups[parsed.Prefix], parsed.Number)
@@ -319,28 +326,29 @@ func (s *Service) FindGaps(ctx context.Context, opts Options) ([]GapResult, erro
 
 	var allGaps []GapResult
 	for prefix, numbers := range prefixGroups {
-		sort.Ints(numbers)
-		var gaps []int
-		for i := 1; i < len(numbers); i++ {
-			expected := numbers[i-1] + 1
-			if numbers[i] != expected {
-				for j := expected; j < numbers[i]; j++ {
-					gaps = append(gaps, j)
-				}
-			}
-		}
-		if len(gaps) > 0 {
-			gapStrs := make([]string, len(gaps))
-			for i, n := range gaps {
-				gapStrs[i] = fmt.Sprintf("%s%03d", prefix, n)
-			}
-			allGaps = append(allGaps, GapResult{
-				Prefix:  prefix,
-				Missing: gapStrs,
-			})
+		if gap := sequenceGaps(prefix, numbers); gap.Unlisted > 0 || len(gap.Missing) > 0 {
+			allGaps = append(allGaps, gap)
 		}
 	}
 	return allGaps, scanErr
+}
+
+// sequenceGaps names the first [maxListedGaps] numbers missing from numbers
+// and counts the rest arithmetically, so its cost is bounded by the number of
+// entities, not by the size of the gaps between them.
+func sequenceGaps(prefix string, numbers []int) GapResult {
+	sort.Ints(numbers)
+	gap := GapResult{Prefix: prefix}
+	for i := 1; i < len(numbers); i++ {
+		for j := numbers[i-1] + 1; j < numbers[i]; j++ {
+			if len(gap.Missing) == maxListedGaps {
+				gap.Unlisted += numbers[i] - j
+				break
+			}
+			gap.Missing = append(gap.Missing, fmt.Sprintf("%s%03d", prefix, j))
+		}
+	}
+	return gap
 }
 
 // --- Cardinality analysis ---

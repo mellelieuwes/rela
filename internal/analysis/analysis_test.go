@@ -135,6 +135,71 @@ func TestFindDuplicates(t *testing.T) {
 	})
 }
 
+// TestFindGaps_ManualIDsAreSkippedByType pins that a manual-ID type is left out
+// even when its ids carry more dashes than its declared prefix: `tw-` parses
+// `tw-basecamp-10078439742` to the prefix `tw-basecamp-`, so a prefix match
+// never excluded it and the analysis enumerated ~20 million "missing" ids.
+func TestFindGaps_ManualIDsAreSkippedByType(t *testing.T) {
+	meta := &metamodel.Metamodel{
+		Entities: map[string]metamodel.EntityDef{
+			"twin": {IDType: metamodel.IDTypeManual, IDPrefix: "tw-"},
+			"req":  {IDType: metamodel.IDTypeSequential, IDPrefix: "REQ-"},
+		},
+	}
+	svc := newServiceWith(t, meta, func(s store.Store) {
+		addEntity(s, "tw-basecamp-10078439742", "twin", nil)
+		addEntity(s, "tw-basecamp-10098661922", "twin", nil)
+		addEntity(s, "REQ-001", "req", nil)
+		addEntity(s, "REQ-003", "req", nil)
+	})
+
+	gaps, err := svc.FindGaps(context.Background(), analysis.Options{})
+	if err != nil {
+		t.Fatalf("FindGaps: %v", err)
+	}
+	if len(gaps) != 1 || gaps[0].Prefix != "REQ-" {
+		t.Fatalf("want only the REQ- sequence, got %+v", gaps)
+	}
+	if got := strings.Join(gaps[0].Missing, ","); got != "REQ-002" {
+		t.Errorf("missing = %q, want REQ-002", got)
+	}
+}
+
+// TestFindGaps_LargeGapIsCountedNotListed pins that a sequence names at most
+// 100 missing ids and counts the rest, so one stray large number costs a count,
+// not a million strings.
+func TestFindGaps_LargeGapIsCountedNotListed(t *testing.T) {
+	meta := &metamodel.Metamodel{
+		Entities: map[string]metamodel.EntityDef{
+			"req": {IDType: metamodel.IDTypeSequential, IDPrefix: "REQ-"},
+		},
+	}
+	svc := newServiceWith(t, meta, func(s store.Store) {
+		addEntity(s, "REQ-001", "req", nil)
+		addEntity(s, "REQ-1000000", "req", nil)
+		addEntity(s, "REQ-2000000", "req", nil)
+	})
+
+	gaps, err := svc.FindGaps(context.Background(), analysis.Options{})
+	if err != nil {
+		t.Fatalf("FindGaps: %v", err)
+	}
+	if len(gaps) != 1 {
+		t.Fatalf("want one sequence, got %d", len(gaps))
+	}
+	const total = (1000000 - 1 - 1) + (2000000 - 1000000 - 1)
+	gap := gaps[0]
+	if len(gap.Missing) != 100 {
+		t.Errorf("listed %d missing ids, want 100", len(gap.Missing))
+	}
+	if gap.Missing[0] != "REQ-002" || gap.Missing[99] != "REQ-101" {
+		t.Errorf("listed %s … %s, want REQ-002 … REQ-101", gap.Missing[0], gap.Missing[99])
+	}
+	if got := len(gap.Missing) + gap.Unlisted; got != total {
+		t.Errorf("listed + unlisted = %d, want %d", got, total)
+	}
+}
+
 func TestFindUniqueViolations(t *testing.T) {
 	// persoon.email is unique; nickname is not; aliases is unique+list (skipped).
 	meta := &metamodel.Metamodel{

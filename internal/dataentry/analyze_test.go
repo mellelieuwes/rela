@@ -183,6 +183,52 @@ func TestAnalyzeGaps_ManualIDsSkipped(t *testing.T) {
 	}
 }
 
+// A manual-ID type whose ids carry more dashes than its declared prefix is
+// still skipped: `tw-` parses `tw-basecamp-10` to the prefix `tw-basecamp-`,
+// which a prefix match never excluded.
+func TestAnalyzeGaps_ManualIDsSkippedByType(t *testing.T) {
+	g := newFixture()
+	meta := &metamodel.Metamodel{
+		Entities: map[string]metamodel.EntityDef{
+			"twin":   {IDType: "manual", IDPrefix: "tw-", Properties: map[string]metamodel.PropertyDef{}},
+			"ticket": {IDPrefix: "T-", Properties: map[string]metamodel.PropertyDef{}},
+		},
+	}
+	g.AddNode(&entity.Entity{ID: "tw-basecamp-10", Type: "twin", Properties: map[string]any{}})
+	g.AddNode(&entity.Entity{ID: "tw-basecamp-15", Type: "twin", Properties: map[string]any{}})
+	g.AddNode(&entity.Entity{ID: "T-001", Type: "ticket", Properties: map[string]any{}})
+	g.AddNode(&entity.Entity{ID: "T-003", Type: "ticket", Properties: map[string]any{}})
+
+	section := newAnalyzeService(t, g, meta).analyzeGaps(context.Background(), meta)
+
+	if len(section.Issues) != 1 || section.Issues[0].Message != "Missing ID: T-002" {
+		t.Fatalf("want only Missing ID: T-002, got %+v", section.Issues)
+	}
+}
+
+// A huge gap stops at the section cap instead of enumerating every number
+// first and trimming afterwards.
+func TestAnalyzeGaps_HugeGapStopsAtTheCap(t *testing.T) {
+	g := newFixture()
+	meta := &metamodel.Metamodel{
+		Entities: map[string]metamodel.EntityDef{
+			"ticket": {IDPrefix: "T-", Properties: map[string]metamodel.PropertyDef{}},
+		},
+	}
+	g.AddNode(&entity.Entity{ID: "T-001", Type: "ticket", Properties: map[string]any{}})
+	g.AddNode(&entity.Entity{ID: "T-5000000", Type: "ticket", Properties: map[string]any{}})
+
+	section := newAnalyzeService(t, g, meta).analyzeGaps(context.Background(), meta)
+
+	if len(section.Issues) != maxSectionIssues || !section.Truncated {
+		t.Fatalf("want %d issues and Truncated, got %d (truncated=%v)",
+			maxSectionIssues, len(section.Issues), section.Truncated)
+	}
+	if section.Issues[0].Message != "Missing ID: T-002" {
+		t.Errorf("first issue = %q, want Missing ID: T-002", section.Issues[0].Message)
+	}
+}
+
 // Entity types with multiple ID prefixes (id_prefixes plural) must still
 // resolve each prefix to the same entity type for gap-row attribution.
 func TestAnalyzeGaps_MultiplePrefixes(t *testing.T) {
