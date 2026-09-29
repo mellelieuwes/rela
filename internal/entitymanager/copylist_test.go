@@ -93,6 +93,7 @@ func newCopyListManager(
 		Audit: audit.Nop{}, ACL: acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		CopyGuard:   g,
 	}
 	withMeta(copyListMeta)(t, &deps)

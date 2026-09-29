@@ -34,7 +34,7 @@ two `denied-write` rows for one denial.
 ### PatchEntity ordering is load-bearing
 
 ```text
-read (raw) → IsLocked guard → authorize → field gate → merge → updateCore
+read (raw) → IsLocked guard → authorize → field gate → merge → twin guard → updateCore
 ```
 
 - The **read comes first** because `acl.EntitySubject` needs the entity's
@@ -55,6 +55,21 @@ read (raw) → IsLocked guard → authorize → field gate → merge → updateC
   row ACL, and `recordACLBypass` still fires. A half-elevated handle that
   silently drops some property writes is the confusing contract the
   elevated-read seam exists to avoid.
+- The **twin guard** ([`rejectTheirsChanges`](twins.go)) refuses a change to
+  a field an external system owns through a twin (`Deps.Twins`, required;
+  `NoTwinOwnership{}` opts out). It is change-based (runs after the merge,
+  compares with `canonical.EqualValue`/`EqualBody`), runs on `UpdateEntity`
+  and on `CopyState` into an existing target too, and — unlike the field
+  gate — **applies under elevation**: bypass_acl
+  lifts the ACL, not the ownership contract. Only the
+  `TwinSyncWriter(m)` handle skips it, and `gated()` strips that capability
+  from nested cascades like it strips `bypassACL`. Automation `set` actions
+  and `ApplyEntity` are system writes and are not gated; Lua script actions
+  write through `gated().PatchEntity` and are. Paths that change entity data
+  outside the manager check ownership themselves, before any byte changes:
+  the attachment service (`attachment.Deps.Twins`, not change-based — any
+  upload or delete on an owned file property is refused) and the data-entry
+  git conflict resolve (`validateEntityWrite` over the changed fields).
 
 ## Audit log
 

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Sourcehaven-BV/rela/internal/entity"
+	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 	"github.com/Sourcehaven-BV/rela/internal/store"
 )
@@ -80,9 +81,17 @@ type AllowAllWrites struct{}
 // AuthorizeAttachmentWrite implements [WriteAuthorizer] and allows every write.
 func (AllowAllWrites) AuthorizeAttachmentWrite(context.Context, *entity.Entity) error { return nil }
 
+// TwinOwnership answers which fields of an entity an external system owns
+// through a twin, keyed by field name ("*" for every field) → owning
+// systems. Defined at the call site; the twins service and
+// [entitymanager.NoTwinOwnership] satisfy it.
+type TwinOwnership interface {
+	OwnedFields(ctx context.Context, entityType, entityID string) (map[string][]string, error)
+}
+
 // Deps is the dependency bundle [New] requires. Store, Meta, EntityManager,
-// Locker and Authorizer are mandatory; [New] returns an error if any is nil.
-// Processor is optional — when nil the service uses [NoopProcessor].
+// Locker, Authorizer and Twins are mandatory; [New] returns an error if any is
+// nil. Processor is optional — when nil the service uses [NoopProcessor].
 type Deps struct {
 	Store         store.Store
 	Meta          *metamodel.Metamodel
@@ -95,6 +104,10 @@ type Deps struct {
 	// Authorizer re-checks each write under the property lock. Use
 	// [AllowAllWrites] where there is no ACL.
 	Authorizer WriteAuthorizer
+	// Twins guards file properties an external system owns: an upload or
+	// delete on one is refused before any bytes change. Pass
+	// [entitymanager.NoTwinOwnership] where no pact is declared.
+	Twins TwinOwnership
 
 	// Processor inspects/rewrites attachment bytes before they are persisted
 	// (scan, MIME validation, transform). Optional; defaults to [NoopProcessor].
@@ -125,6 +138,9 @@ func New(d Deps) (*Service, error) {
 	}
 	if d.Authorizer == nil {
 		return nil, errors.New("attachment: Authorizer is required")
+	}
+	if d.Twins == nil {
+		return nil, errors.New("attachment: Twins is required")
 	}
 	if d.Processor == nil {
 		d.Processor = NoopProcessor{}
@@ -231,6 +247,9 @@ var ErrAtCapacity = errors.New("attachment: property already holds the maximum n
 func (s *Service) WriteAttachment(
 	ctx context.Context, e *entity.Entity, propDef metamodel.PropertyDef, propName, rawFileName string, r io.Reader,
 ) (*Result, error) {
+	if err := s.rejectOwned(ctx, e, propName); err != nil {
+		return nil, err
+	}
 	maxCount := propDef.FileMax()
 
 	// Fail fast on a full property before reading or scanning any bytes. The
@@ -409,6 +428,9 @@ func (s *Service) DeleteAttachment(
 func (s *Service) deleteFile(
 	ctx context.Context, e *entity.Entity, propDef metamodel.PropertyDef, propName, fileName string,
 ) (bool, error) {
+	if err := s.rejectOwned(ctx, e, propName); err != nil {
+		return false, err
+	}
 	err := s.deps.Store.DeleteAttachment(ctx, e.ID, propName, fileName)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return false, fmt.Errorf("delete attachment: %w", err)
@@ -500,6 +522,30 @@ func (s *Service) attachmentFileNames(ctx context.Context, entityID, property st
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// rejectOwned refuses any change to a file property an external system owns
+// through a twin, as an [entitymanager.TheirsWriteError]. It runs before any
+// store byte operation: the manager's own guard only sees the stamp patch,
+// which comes after the bytes changed (and a same-name upload does not change
+// the stamp at all). Unlike that guard it is not change-based — the bytes
+// are the value, and every upload or delete changes them.
+//
+// A lookup error fails closed: "cannot tell who owns this" must not become
+// "nobody owns this".
+func (s *Service) rejectOwned(ctx context.Context, e *entity.Entity, propName string) error {
+	owned, err := s.deps.Twins.OwnedFields(ctx, e.Type, e.ID)
+	if err != nil {
+		return fmt.Errorf("attachment: twin ownership of %s: %w", e.ID, err)
+	}
+	systems := append(slices.Clone(owned[propName]), owned[metamodel.PactAllFields]...)
+	if len(systems) == 0 {
+		return nil
+	}
+	slices.Sort(systems)
+	return &entitymanager.TheirsWriteError{
+		Type: e.Type, ID: e.ID, Fields: []string{propName}, Systems: slices.Compact(systems),
+	}
 }
 
 // stamp records names as the property's value with a patch that names only

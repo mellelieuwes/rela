@@ -55,8 +55,8 @@ func testAttachmentDeps(
 	t *testing.T, svc *appbuild.Services, meta *metamodel.Metamodel, sink audit.Audit,
 ) AttachmentDeps {
 	t.Helper()
-	snap, err := NewAttachmentSnapshot(
-		svc.Store(), svc.EntityManager(), lock.NewMemoryLocker(), svc.ACL(), meta, nil, store.MaxAttachmentBytes)
+	snap, err := NewAttachmentSnapshot(svc.Store(), svc.EntityManager(), lock.NewMemoryLocker(), svc.ACL(),
+		appbuild.TwinOwnership(svc), meta, nil, store.MaxAttachmentBytes)
 	if err != nil {
 		t.Fatalf("NewAttachmentSnapshot: %v", err)
 	}

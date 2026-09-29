@@ -49,6 +49,7 @@ func TestDeleteEntity_PropagatesStoreError(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}
 	mgr, err := entitymanager.New(deps)
 	if err != nil {
@@ -89,6 +90,7 @@ func TestDeleteEntity_CascadeAuditsReportedRelations(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}
 	mgr, err := entitymanager.New(deps)
 	if err != nil {

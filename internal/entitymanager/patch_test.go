@@ -58,6 +58,7 @@ func newPatchManager(t *testing.T, gate entitymanager.FieldWriteGate) (*entityma
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   gate,
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -503,6 +504,7 @@ func TestPatchEntity_RunsFullPipeline(t *testing.T) {
 		Cascade:     runner,
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -562,6 +564,7 @@ func TestPatchEntity_AutomationNotFieldGated(t *testing.T) {
 		Cascade:     runner,
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   gate,
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -628,6 +631,7 @@ func TestPatchEntity_GateRunsAfterAuthorize(t *testing.T) {
 				ACL:         denyWritesACL{},
 				Transitions: statemachine.EmptySet(),
 				FieldGate:   gate,
+				Twins:       entitymanager.NoTwinOwnership{},
 			})
 			if err != nil {
 				t.Fatalf("entitymanager.New: %v", err)

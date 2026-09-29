@@ -330,3 +330,56 @@ func TestEntityRelationDisjoint(t *testing.T) {
 		t.Fatal("entity and relation hashes collided")
 	}
 }
+
+// TestEqualValue_AgreesWithHash pins that the value comparison twins
+// reconcile with is the hash's notion of "same", in both directions: two
+// values are equal exactly when an entity holding one hashes like an entity
+// holding the other.
+func TestEqualValue_AgreesWithHash(t *testing.T) {
+	when := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		a, b any
+		want bool
+	}{
+		{"int vs whole float", 3, 3.0, true},
+		{"int vs int64", 3, int64(3), true},
+		{"fractional floats differ", 3.5, 3.25, false},
+		{"string slice vs any slice", []string{"x", "y"}, []any{"x", "y"}, true},
+		{"list order matters", []string{"x", "y"}, []any{"y", "x"}, false},
+		{"time vs its RFC3339 string", when, "2026-05-01T00:00:00Z", true},
+		{"nil vs nil", nil, nil, true},
+		{"nil vs empty string", nil, "", false},
+		{"nil vs empty list", nil, []any{}, false},
+		{"string vs number", "1", 1, false},
+		{"bools", true, false, false},
+		{"nested maps", map[string]any{"a": 1}, map[any]any{"a": 1.0}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonical.EqualValue(tc.a, tc.b); got != tc.want {
+				t.Fatalf("EqualValue(%#v, %#v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+			ea := entity.Entity{ID: "E1", Type: "t", Properties: map[string]any{"p": tc.a}}
+			eb := entity.Entity{ID: "E1", Type: "t", Properties: map[string]any{"p": tc.b}}
+			if hashEqual := canonical.HashEntity(ea) == canonical.HashEntity(eb); hashEqual != tc.want {
+				t.Fatalf("hash equality %v disagrees with EqualValue %v", hashEqual, tc.want)
+			}
+		})
+	}
+}
+
+// TestEqualBody_IgnoresReflow pins that a body fsstore reflowed on write
+// equals the text it was written from, while a real edit does not.
+func TestEqualBody_IgnoresReflow(t *testing.T) {
+	raw := "A long line that the formatter will certainly want to wrap because it runs well past eighty columns."
+	if mustReflow(raw) == raw {
+		t.Fatal("precondition: the formatter must change this body, or the test proves nothing")
+	}
+	if !canonical.EqualBody(raw, mustReflow(raw)) {
+		t.Fatal("a reflowed body must equal its source")
+	}
+	if canonical.EqualBody(raw, raw+" More.") {
+		t.Fatal("an edited body must not equal the original")
+	}
+}

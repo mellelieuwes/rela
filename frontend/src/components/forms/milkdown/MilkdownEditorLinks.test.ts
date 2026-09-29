@@ -285,6 +285,23 @@ describe('link retarget and removal', () => {
     expect(button(w, 'Remove link')).toBeTruthy()
     w.unmount()
   })
+
+  // Edit and Remove both write the document. A read-only body hides the
+  // toolbar, so the panel was the one link control left that could still
+  // change it.
+  it('shows no link panel in a read-only body', async () => {
+    const src = '[docs](https://a.test/)\n'
+    const editable = await mountEditor({ modelValue: src })
+    await selectRange(editable, 2, 2)
+    // Positive control: the same caret shows the panel when editable.
+    expect(editable.find('.link-tooltip').exists()).toBe(true)
+    editable.unmount()
+
+    const w = await mountEditor({ modelValue: src, readonly: true })
+    await selectRange(w, 2, 2)
+    expect(w.find('.link-tooltip').exists()).toBe(false)
+    w.unmount()
+  })
 })
 
 describe('divider and history', () => {

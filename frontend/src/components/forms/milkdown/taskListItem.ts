@@ -91,10 +91,17 @@ class TaskListItemView implements NodeView {
     // which also undoes anything `update()` set during the dispatch — leaving
     // a ticked document under an unticked box. So the browser's own flip is
     // allowed to stand and the dispatch below makes the document agree with
-    // it; `update()` remains authoritative on every later redraw. The two
-    // early returns cover the case where no write is possible, where the flip
-    // would otherwise be a tick backed by nothing.
+    // it; `update()` remains authoritative on every later redraw. The early
+    // returns cover the cases where no write is possible or allowed, where the
+    // flip would otherwise be a tick backed by nothing.
     this.checkbox.addEventListener('click', () => {
+      // A read-only editor (e.g. an external system owns the body) renders the
+      // box but must not write it. `editable: false` only gates ProseMirror's
+      // own input handlers; this listener is ours, so it has to ask itself.
+      if (!view.editable) {
+        this.checkbox.checked = this.node.attrs.checked === true
+        return
+      }
       const pos = getPos()
       if (pos == null) {
         // No position means no document write is possible, so the browser's

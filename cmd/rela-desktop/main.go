@@ -453,6 +453,9 @@ func (d *Desktop) loadProject(dir string, keepExisting bool) string {
 	if err != nil {
 		return d.failLoad(err)
 	}
+	// Twins: owned fields render read-only and the `_twins` read-out answers,
+	// as on rela-server. Nil (no pact declared) leaves both off.
+	dataentry.SetTwins(app, appbuild.Twins(svc))
 	handler := app.NewRouter()
 
 	// Start background scheduler for the new project.

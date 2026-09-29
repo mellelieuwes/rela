@@ -89,6 +89,7 @@ func TestCopyReplace_DeletesTheTargetTail(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		CopyGuard:   allowGuard{allow: true},
 	})
 	if err != nil {

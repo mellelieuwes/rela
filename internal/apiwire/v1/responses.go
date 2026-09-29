@@ -21,44 +21,10 @@ type Entity struct {
 	Self         string              `json:"_self,omitempty"`
 	Actions      map[string]bool     `json:"_actions,omitempty"`
 	Inaccessible []InaccessibleField `json:"inaccessible,omitempty"`
-	// FieldAffordances carries per-field write affordances on per-entity
-	// GET responses. Sparse: only fields whose verdict deviates from the
-	// permissive default appear. Hidden fields are omitted from
-	// `Properties` AND from this map entirely. Pointer semantics
-	// distinguish "absent on the wire" (nil pointer; list / mutation
-	// responses) from "present and empty" (`{}`; per-entity GET with no
-	// deviations under nop resolver — closed-world signal matching the
-	// `_actions` precedent).
-	FieldAffordances *map[string]FieldAffordance `json:"_fields,omitempty"`
-	// RelationAffordances carries per-relation-type affordances on
-	// per-entity GET responses. Same face / closed-world semantics
-	// as FieldAffordances.
-	RelationAffordances *map[string]RelationAffordance `json:"_relations,omitempty"`
-	// Redacted names the properties withheld from `Properties` by
-	// field-level ACL (`visible:`) on THIS response (DEC-T0XIWQ). It is the
-	// field-level sibling of Inaccessible, which says the same thing
-	// ("exists, value unreadable") for git-crypt-locked content.
-	//
-	// It exists because absence from `Properties` is ambiguous — a key can be
-	// missing because it was redacted OR because it was never set — and a
-	// WRITE surface has to tell those apart to know which inputs it may
-	// offer. Read-out surfaces are happy to conflate them; an edit form is
-	// not. Clients MUST NOT infer redaction from absence: consult this list.
-	//
-	// Disclosure boundary: this leaks property NAMES, never VALUES. That is
-	// not a new disclosure — the metamodel endpoint already serves the
-	// declared property names per type, and `visible:` redaction is defined
-	// as hiding values only, making no claim to conceal which properties
-	// exist. Row-level ACL is unaffected: whether an ENTITY exists remains a
-	// genuine secret, and this list only ever rides a response the caller was
-	// already authorized to read.
-	//
-	// Same face / closed-world semantics as FieldAffordances: present
-	// (possibly empty) on per-entity responses — `[]` meaning "evaluated,
-	// nothing redacted" — and nil on list rows and other non-per-entity
-	// shapes, which carry no write affordances. Names are sorted for a
-	// deterministic wire.
-	Redacted *[]string `json:"_redacted,omitempty"`
+	// EntityWriteAffordances carries the per-entity write hints (`_fields`,
+	// `_relations`, `_redacted`, `content_writable`), flattened onto the
+	// entity on the wire.
+	EntityWriteAffordances
 	// Attachments maps a `file`-type property name to the LIST of files
 	// currently attached to it (a property may hold several when its
 	// metamodel `max` > 1). The value is always an array — even a
@@ -171,14 +137,71 @@ type Entity struct {
 	Warnings []Warning `json:"warnings,omitempty"`
 }
 
+// EntityWriteAffordances groups the write-surface hints of a per-entity
+// response. Embedded in [Entity], so every field serializes at the top level;
+// the grouping is Go-side only and does not change the wire.
+type EntityWriteAffordances struct {
+	// FieldAffordances carries per-field write affordances on per-entity
+	// GET responses. Sparse: only fields whose verdict deviates from the
+	// permissive default appear. Hidden fields are omitted from
+	// `Properties` AND from this map entirely. Pointer semantics
+	// distinguish "absent on the wire" (nil pointer; list / mutation
+	// responses) from "present and empty" (`{}`; per-entity GET with no
+	// deviations under nop resolver — closed-world signal matching the
+	// `_actions` precedent).
+	FieldAffordances *map[string]FieldAffordance `json:"_fields,omitempty"`
+	// RelationAffordances carries per-relation-type affordances on
+	// per-entity GET responses. Same face / closed-world semantics
+	// as FieldAffordances.
+	RelationAffordances *map[string]RelationAffordance `json:"_relations,omitempty"`
+	// Redacted names the properties withheld from `Properties` by
+	// field-level ACL (`visible:`) on THIS response (DEC-T0XIWQ). It is the
+	// field-level sibling of Inaccessible, which says the same thing
+	// ("exists, value unreadable") for git-crypt-locked content.
+	//
+	// It exists because absence from `Properties` is ambiguous — a key can be
+	// missing because it was redacted OR because it was never set — and a
+	// WRITE surface has to tell those apart to know which inputs it may
+	// offer. Read-out surfaces are happy to conflate them; an edit form is
+	// not. Clients MUST NOT infer redaction from absence: consult this list.
+	//
+	// Disclosure boundary: this leaks property NAMES, never VALUES. That is
+	// not a new disclosure — the metamodel endpoint already serves the
+	// declared property names per type, and `visible:` redaction is defined
+	// as hiding values only, making no claim to conceal which properties
+	// exist. Row-level ACL is unaffected: whether an ENTITY exists remains a
+	// genuine secret, and this list only ever rides a response the caller was
+	// already authorized to read.
+	//
+	// Same face / closed-world semantics as FieldAffordances: present
+	// (possibly empty) on per-entity responses — `[]` meaning "evaluated,
+	// nothing redacted" — and nil on list rows and other non-per-entity
+	// shapes, which carry no write affordances. Names are sorted for a
+	// deterministic wire.
+	Redacted *[]string `json:"_redacted,omitempty"`
+	// ContentWritable reports whether a caller-authored write may change
+	// `content`. False when an external system owns the body through a twin
+	// (a pact's `theirs` names `body` or `*`); the write path then refuses a
+	// changed body with 422. Same pointer semantics as FieldAffordances:
+	// present on per-entity responses, nil on list rows. A UI hint, never
+	// authorization — the write path re-enforces ownership.
+	ContentWritable *bool `json:"content_writable,omitempty"`
+}
+
 // FieldAffordance describes per-field write / option affordances on
 // the wire. Sparse: `Writable` is nil when the default (writable)
 // holds; `Options` lists only the false entries (allowed options are
 // implicit via the metamodel). See the closed-world contract in
 // docs/data-entry/api-reference.md.
+//
+// Reason explains a `writable: false` verdict when the cause is more
+// specific than the policy's read-only (today: "Owned by basecamp" for a
+// field an external system owns through a twin). Empty otherwise. It is a
+// finished sentence, displayed verbatim.
 type FieldAffordance struct {
 	Writable *bool           `json:"writable,omitempty"`
 	Options  map[string]bool `json:"options,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
 }
 
 // RelationAffordance describes per-relation-type affordances on the
@@ -474,6 +497,29 @@ type EntityType struct {
 	// Omitted when false, so a project with no `comments:` block serves a
 	// schema byte-identical to one built before the feature existed.
 	Commentable bool `json:"commentable,omitempty"`
+
+	// Pacts lists the external systems this type is twinned with and which
+	// fields each owns, sorted by system, so the SPA can explain why a field
+	// is read-only. Instructions (the agent brief) are not served.
+	//
+	// Omitted when the type declares no pacts, so a project without `pacts:`
+	// serves a schema byte-identical to one built before the feature existed.
+	Pacts []Pact `json:"pacts,omitempty"`
+}
+
+// Pact is the JSON representation of one entity type's contract with an
+// external system, mirroring metamodel.Pact minus its instructions.
+type Pact struct {
+	System string `json:"system"`
+	Scope  string `json:"scope"`
+	// Theirs are the fields the external system owns; ["*"] means every
+	// field except computed properties, which are always rela's. Shared are
+	// edited by both sides. Propose are rela-owned fields whose external edits
+	// are proposed rather than reverted. All sorted; empty lists are served as
+	// [] rather than omitted.
+	Theirs  []string `json:"theirs"`
+	Shared  []string `json:"shared"`
+	Propose []string `json:"propose"`
 }
 
 // WorldMessages is the operator's chrome text for one world. See

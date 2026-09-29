@@ -22,6 +22,26 @@ async function mountEditor(props: Record<string, unknown> = {}) {
   return wrapper
 }
 
+/**
+ * Invokes the component's own markdownUpdated callback.
+ *
+ * Milkdown's listener is debounced and does not fire for a programmatic
+ * dispatch under happy-dom, so every assertion about the emit channel could
+ * only ever be negative — and a negative assertion cannot tell "correctly
+ * suppressed" from "never ran". Calling the registered callback exercises
+ * the real path: guard included.
+ */
+function fireMarkdownUpdated(w: ReturnType<typeof mount>, markdown: string) {
+  const editor = (
+    w.vm as unknown as { editorInstanceForTest: { ctx: { get: (k: unknown) => unknown } } }
+  ).editorInstanceForTest
+  const manager = editor.ctx.get(listenerCtx) as unknown as {
+    markdownUpdatedListeners: Array<(ctx: unknown, md: string, prev: string) => void>
+  }
+  expect(manager.markdownUpdatedListeners.length).toBeGreaterThan(0)
+  for (const fn of manager.markdownUpdatedListeners) fn(null, markdown, '')
+}
+
 describe('MilkdownEditor', () => {
   beforeEach(() => {
     searchEntities.mockReset()
@@ -691,26 +711,6 @@ describe('MilkdownEditor write-back guard, through the component', () => {
     w.unmount()
   })
 
-  /**
-   * Invokes the component's own markdownUpdated callback.
-   *
-   * Milkdown's listener is debounced and does not fire for a programmatic
-   * dispatch under happy-dom, so every assertion about the emit channel could
-   * only ever be negative — and a negative assertion cannot tell "correctly
-   * suppressed" from "never ran". Calling the registered callback exercises
-   * the real path: guard included.
-   */
-  function fireMarkdownUpdated(w: ReturnType<typeof mount>, markdown: string) {
-    const editor = (
-      w.vm as unknown as { editorInstanceForTest: { ctx: { get: (k: unknown) => unknown } } }
-    ).editorInstanceForTest
-    const manager = editor.ctx.get(listenerCtx) as unknown as {
-      markdownUpdatedListeners: Array<(ctx: unknown, md: string, prev: string) => void>
-    }
-    expect(manager.markdownUpdatedListeners.length).toBeGreaterThan(0)
-    for (const fn of manager.markdownUpdatedListeners) fn(null, markdown, '')
-  }
-
   // The guard must sit ON the emit, not beside it. It was previously exposed
   // as an optional `guardedValue()` the form could choose to prefer, while
   // `update:modelValue` carried the raw serialization — so the churn reached
@@ -812,6 +812,53 @@ describe('MilkdownEditor flush', () => {
     vm.flush()
     await flushPromises()
     expect(w.emitted('update:modelValue')).toEqual([['Xbefore\n']])
+    w.unmount()
+  })
+})
+
+// A read-only body must not reach the form, whatever changed the document.
+// The toolbar and ProseMirror's own input handlers are gated elsewhere; these
+// pin the emit channel itself, so a path nobody gated (the task-list toggle
+// was one) still cannot produce a save.
+describe('MilkdownEditor read-only emit channel', () => {
+  beforeEach(() => {
+    searchEntities.mockReset()
+    searchEntities.mockResolvedValue({ data: [] })
+  })
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  // The component's defineExpose surface, which `w.vm` does not type.
+  type Exposed = {
+    flush: () => void
+    editorViewForTest: { state: EditorState; dispatch: (tr: unknown) => void }
+  }
+
+  async function mountDirtyReadonly() {
+    const w = await mountEditor({ modelValue: 'before\n', readonly: true })
+    const exposed = w.vm as unknown as Exposed
+    const view = exposed.editorViewForTest
+    // A transaction ProseMirror's gate does not see, like the task-list
+    // toggle was: the document is dirty, so only the read-only gate is left.
+    view.dispatch(view.state.tr.insertText('X', 1))
+    await flushPromises()
+    return { w, exposed }
+  }
+
+  it('flush emits nothing', async () => {
+    const { w, exposed } = await mountDirtyReadonly()
+    exposed.flush()
+    await flushPromises()
+    expect(w.emitted('update:modelValue')).toBeUndefined()
+    w.unmount()
+  })
+
+  it('the markdown listener emits nothing', async () => {
+    const { w } = await mountDirtyReadonly()
+    fireMarkdownUpdated(w, 'Xbefore\n')
+    await flushPromises()
+    expect(w.emitted('update:modelValue')).toBeUndefined()
     w.unmount()
   })
 })

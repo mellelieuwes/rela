@@ -270,8 +270,8 @@ func (h *attachmentHandler) auditRejectedUpload(
 
 // writeAttachmentWriteError maps a Service.WriteAttachment failure to the
 // right HTTP status: 413 (size), 409 (at capacity), 503 (another write to
-// the property held it too long), 403 (ACL deny from the entity update), or
-// 422 (validation / other).
+// the property held it too long), 403 (ACL deny from the entity update),
+// 422 externally_owned (a twin owns the property), or 422 (validation / other).
 func writeAttachmentWriteError(w http.ResponseWriter, r *http.Request, limit int64, err error) {
 	if isAttachmentTooLarge(err) {
 		writeAttachmentTooLarge(w, r, limit)
@@ -292,7 +292,7 @@ func writeAttachmentWriteError(w http.ResponseWriter, r *http.Request, limit int
 			"Attachment rejected", attachment.RejectionReason(err))
 		return
 	}
-	if writeForbiddenIfACLDenied(w, err) {
+	if writeExternallyOwnedIf(w, err) || writeForbiddenIfACLDenied(w, err) {
 		return
 	}
 	slog.Warn("dataentry: attachment write failed", "err", err, "path", r.URL.Path)
@@ -426,6 +426,7 @@ func (h *attachmentHandler) attachmentService(s *Schema) (*attachment.Service, e
 		EntityManager: h.manager,
 		Locker:        h.locker,
 		Authorizer:    aclAttachmentAuthorizer{acl: h.acl(), audit: h.audit()},
+		Twins:         h.owned,
 		// Native MIME allowlist + (when a command runner is wired) scan/
 		// transform. h.runner is nil out-of-box → MIME validation only.
 		Processor: attachment.NewPolicyProcessor(s.Meta, h.runner()),
@@ -471,7 +472,7 @@ func (h *attachmentHandler) handleV1DeleteAttachment(
 	}
 	propDef := filePropertyDef(s, typeName, property)
 	if err := svc.DeleteAttachment(ctx, entity, propDef, property, fileName); err != nil {
-		if writeAttachmentBusy(w, r, err) || writeForbiddenIfACLDenied(w, err) {
+		if writeAttachmentBusy(w, r, err) || writeExternallyOwnedIf(w, err) || writeForbiddenIfACLDenied(w, err) {
 			return
 		}
 		slog.Warn("dataentry: delete attachment failed", "err", err, "path", r.URL.Path)
@@ -485,9 +486,11 @@ func (h *attachmentHandler) handleV1DeleteAttachment(
 
 // attachmentWritePreflight runs the shared front matter for an attachment
 // write: read-gate (uniform 404), load the entity, validate the property
-// is a declared `file` type, reject a locked (inaccessible) entity, and
-// authorize the `update` write UP FRONT so a deny never reaches the store.
-// Returns the loaded entity and true when the write may proceed.
+// is a declared `file` type, reject a locked (inaccessible) entity,
+// authorize the `update` write, and refuse a property an external system
+// owns — all UP FRONT, so a refusal never reaches the store (or, for an
+// upload, reads the body). Returns the loaded entity and true when the write
+// may proceed.
 func (h *attachmentHandler) attachmentWritePreflight(
 	w http.ResponseWriter, r *http.Request, s *Schema, typeName, entityID, property string,
 ) (*entityPkg.Entity, bool) {
@@ -521,6 +524,15 @@ func (h *attachmentHandler) attachmentWritePreflight(
 		h.audit().Record(audit.AttachmentWriteDenied(ctx, entity.Type, entity.ID,
 			decision.Reason, decision.RuleKind, decision.RuleID))
 		writeForbiddenIfACLDenied(w, &acl.ForbiddenError{Decision: decision})
+		return nil, false
+	}
+
+	// A twin-owned file property changes only in the external system. The
+	// attachment service re-checks before touching bytes; this answers
+	// before the upload body is read.
+	def, _ := s.Meta.GetEntityDef(typeName)
+	if own := resolveTwinOwnership(ctx, h.owned, entity, def); own.ownsProperty(property) {
+		writeExternallyOwned(w, own.denial(entity, property).Reason)
 		return nil, false
 	}
 	return entity, true

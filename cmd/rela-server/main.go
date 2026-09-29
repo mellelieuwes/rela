@@ -517,6 +517,7 @@ func main() {
 	// without it the routes are not registered at all.
 	app.SetCalDAVAliases(svc.CalDAVAliases())
 	app.SetComments(svc.Comments())
+	dataentry.SetTwins(app, appbuild.Twins(svc))
 
 	wireWorlds(app, svc)
 

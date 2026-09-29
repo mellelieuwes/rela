@@ -1,0 +1,9 @@
+---
+id: RR-IIG085
+type: review-response
+title: 'Code review: Guard CopyState writes into an existing twinned target'
+finding: '`POST /api/v1/_copies/{name}` with a caller-supplied `target_id` reaches `Manager.CopyState`. `probeCopyTarget` accepts an existing unfaced target (copy.go:310-327). `buildCopyTarget` clones it and overwrites every mapped field, and under `fields: all` every property plus the body (copy.go:515-532). `applyCopy` then writes it with `view.UpdateEntity` (copy_apply.go:27). `rejectTheirsChanges` is never called: its only call sites are manager.go:984-988 (UpdateEntity) and 1116-1120 (PatchEntity). Pacts only forbid faced types, so a cross-entity copy such as `from: ticket, to: scenario, fields: {title: ...}` run with target_id=SC-015 silently changes a theirs field of a twinned scenario for any principal with `update` ACL. The next pull reports it as local_drift and writes it back. The TwinSyncWriter/elevation contract (''only the sync handle may write owned fields'') does not hold for this path. Fix: in buildCopyTarget, after the merge and before validation, add `if plan.existing != nil && !ce.m.twinSync { if err := rejectTheirsChanges(ctx, ce.m.deps, plan.existing, target); err != nil { return err } }`. Map `*TheirsWriteError` to `writeExternallyOwned` in the copies handler''s error mapper. Add a twins_test.go case: a copy into a twinned target that changes an owned field is refused and the store is unchanged.'
+severity: significant
+resolution: 'buildCopyTarget runs the change-based ownership guard when the copy lands on an existing entity (skipped only for the twin-sync handle); the copies handler maps TheirsWriteError to 422 externally_owned. Tests: TestCopyState_TwinOwnership, TestCopiesHandler_OwnedTargetIs422ExternallyOwned (both fail without the fix).'
+status: addressed
+---

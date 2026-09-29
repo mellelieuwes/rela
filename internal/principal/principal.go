@@ -390,6 +390,11 @@ const (
 	// audit log distinguishes an auto-provisioned stub from a human edit; paired
 	// with [UserProvisioner].
 	ToolProvisioner = "provisioner"
+	// ToolTwin attributes writes made by the `rela twin` commands: an agent
+	// syncing an entity with its counterpart in an external system. The audit
+	// log then shows a sync write as tool=twin with the real user, apart from
+	// that user's direct CLI edits.
+	ToolTwin = "twin"
 )
 
 // UserScheduler is the default [Principal.User] for scheduled tasks that

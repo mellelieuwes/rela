@@ -36,14 +36,15 @@ var _ entitymanager.AliasRewriter = (*aliasFanout)(nil)
 // nothing. Returns the single subscriber unwrapped when there is exactly one,
 // keeping the common case free of an indirection.
 //
-// A disabled subsystem reaches us as a typed nil — buildComments and
-// buildStateAndAliases both signal "feature off" by returning a nil
-// *comments.Service / *caldavalias.Service, and passing that concrete pointer
-// into this variadic boxes it into an interface with a non-nil type word. A
-// plain `s != nil` does not see through that box, so the dead subscriber was
-// kept and the first delete dereferenced it. Hence isNilSubscriber.
+// A disabled subsystem reaches us as a typed nil — buildComments, buildTwins
+// and buildStateAndAliases all signal "feature off" by returning a nil
+// *comments.Service / *twins.Service / *caldavalias.Service, and passing that
+// concrete pointer into this variadic boxes it into an interface with a
+// non-nil type word. A plain `s != nil` does not see through that box, so the
+// dead subscriber was kept and the first delete dereferenced it. Hence
+// isNilSubscriber.
 //
-// This settles the question for alias subscribers only. The same two services
+// This settles the question for alias subscribers only. The same services
 // also travel to [Services] as concrete fields, where `!= nil` does work and
 // each consumer nil-checks them separately; nothing here protects those.
 func newAliasFanout(subs ...entitymanager.AliasRewriter) entitymanager.AliasRewriter {

@@ -101,6 +101,7 @@ go build -o rela ./cmd/rela
 | [CalDAV to-do (VTODO) client compatibility](docs/caldav-clients.md) | Which task apps speak VTODO, and what each does with formatted descriptions |
 | [Data Migration](docs/data-migration.md) | Detect schema shape changes and migrate stored content with generated, reviewable migrations |
 | [Comments: Annotating Entities, Fields and Text](docs/comments.md) | Enable commenting, control who may comment, and understand how anchors survive edits |
+| [Twins: integrating entities with external systems](docs/twins.md) | Declare which system owns which field with a pact, keep each entity's external counterpart in sync through an agent, and understand what rela enforces |
 
 ### Tutorials
 

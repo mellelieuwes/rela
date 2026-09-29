@@ -260,6 +260,11 @@ const userTouched = ref<Set<string>>(new Set())
 // via `to[0]` (which is wrong for polymorphic relations).
 const pickerTypes = ref<Record<string, Map<string, string>>>({})
 const content = ref('')
+// False when the server reports `content_writable: false` (an external system
+// owns the body through a twin): the editor renders read-only with a hint. Any
+// other value — including absent, on a create — leaves it editable; the server
+// re-enforces ownership on the write either way.
+const contentWritable = ref(true)
 // The server's per-principal mentions map for the loaded body, and the
 // resolver the editor renders references with. Shared with the read view via
 // makeRefResolver so a reference shows the same title on both surfaces.
@@ -509,6 +514,13 @@ function isFieldReadonly(field: FormFieldOrRelation): boolean {
   return !isFieldWritable(verdict, field.readonly)
 }
 
+// The server's reason for a read-only verdict (e.g. "owned by basecamp"),
+// shown as the field's help. Undefined when none was given.
+function readonlyReasonFor(field: FormFieldOrRelation): string | undefined {
+  if (!field.property) return undefined
+  return fieldAffordances.value[field.property]?.reason
+}
+
 // TKT-G7N5 option-verdict helper: pulls per-option allowed-map from
 // the server's _fields verdict. Undefined if no verdict for this
 // field (all options allowed by default). Sparse: only false entries
@@ -612,6 +624,7 @@ async function loadEntity(force = false) {
     formData.value = { ...entity.properties }
     relations.value = entity.relations ? { ...entity.relations } : {}
     content.value = entity.content || ''
+    contentWritable.value = entity.content_writable !== false
     // TKT-G7N5: per-entity affordances from the server. The wire keys
     // are always present on per-entity GET (possibly empty); we
     // default to empty maps so the filter / readonly / options paths
@@ -2670,6 +2683,7 @@ defineExpose({
               :save-generation="saveGeneration"
               :get-property-def="getPropertyDef"
               :is-field-readonly="isFieldReadonly"
+              :readonly-reason-for="readonlyReasonFor"
               :option-verdicts-for="optionVerdictsFor"
               :transitions-for="transitionsFor"
               @update-field="proposeChange"
@@ -2689,11 +2703,15 @@ defineExpose({
         <!-- Content field (markdown body). Shown on the final (or only) step. -->
         <div v-if="wizard.isLastStep.value" class="form-field content-field">
           <label for="content">Content</label>
+          <p v-if="!contentWritable" class="content-owned-hint">
+            This content is kept in sync with an external system; change it there.
+          </p>
           <MarkdownEditor
             ref="markdownEditorRef"
             :model-value="content"
             :ref-resolver="refResolver"
             :mention-self="mentionSelf"
+            :readonly="!contentWritable"
             placeholder="Markdown content..."
             @update:model-value="updateContent"
           />
@@ -3092,6 +3110,12 @@ defineExpose({
 .content-field {
   margin-top: 16px;
   margin-bottom: 24px;
+}
+
+.content-owned-hint {
+  margin: 0 0 var(--space-xs);
+  font-size: var(--font-size-sm);
+  color: var(--muted-text);
 }
 
 /* Visually hidden but exposed to assistive tech (the standard sr-only clip,

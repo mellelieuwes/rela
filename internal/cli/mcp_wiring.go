@@ -263,8 +263,8 @@ func (s *mcpServices) deps() relamcp.Deps {
 // snapshot is built once per assembly because the metamodel only changes on
 // reload, which rebuilds the Deps. Caller holds mu.
 func (s *mcpServices) attachmentDeps() relamcp.AttachmentDeps {
-	snap, err := relamcp.NewAttachmentSnapshot(
-		s.svc.Store(), s.svc.EntityManager(), s.attachLocker, s.svc.ACL(), s.svc.Meta(), nil, store.MaxAttachmentBytes)
+	snap, err := relamcp.NewAttachmentSnapshot(s.svc.Store(), s.svc.EntityManager(), s.attachLocker, s.svc.ACL(),
+		appbuild.TwinOwnership(s.svc), s.svc.Meta(), nil, store.MaxAttachmentBytes)
 	return relamcp.AttachmentDeps{
 		Snapshot:   func() (relamcp.AttachmentSnapshot, error) { return snap, err },
 		Uploads:    s.attachUploads,

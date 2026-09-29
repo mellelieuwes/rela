@@ -149,6 +149,29 @@ func IsUniqueViolation(err error) bool {
 	return false
 }
 
+// WriteRejected marks the write as refused on its content — the entity it
+// would have produced is invalid — as opposed to a conflict, a denial or an
+// I/O failure. Consumers that cannot import this package (the twins sync
+// path) detect it structurally to record the refusal instead of retrying.
+// Unique-constraint violations are ValidationErrors too, so they carry it.
+func (e *ValidationError) WriteRejected() bool { return true }
+
+// transitionRejectedError wraps a state-machine legality, precondition or
+// entry failure so it carries the same WriteRejected marker as
+// [ValidationError]. The text and the errors.Is chain are the wrapped
+// error's, unchanged. A guard denial is NOT wrapped: it is an authorization
+// failure and surfaces as an acl.ForbiddenError (see
+// Manager.mapTransitionError).
+type transitionRejectedError struct{ err error }
+
+func (e transitionRejectedError) Error() string { return e.err.Error() }
+
+func (e transitionRejectedError) Unwrap() error { return e.err }
+
+// WriteRejected marks the transition failure as a content refusal. See
+// [ValidationError.WriteRejected].
+func (e transitionRejectedError) WriteRejected() bool { return true }
+
 // newValidationError wraps a slice of metamodel validation errors.
 func newValidationError(errs []*metamodel.ValidationError) *ValidationError {
 	return &ValidationError{Errors: errs}

@@ -397,7 +397,8 @@ func (s *FSStore) updateEntityIf(
 
 	stored := e.Clone()
 	stored.UpdatedAt = time.Now()
-	if err := s.writeEntity(stored); err != nil {
+	err = s.writeEntity(stored)
+	if err != nil {
 		return "", err
 	}
 
@@ -407,7 +408,7 @@ func (s *FSStore) updateEntityIf(
 	// type-change-on-update store contract (storetest UpdateChangesType).
 	if meta.Type != e.Type {
 		oldKey := s.layout.entityFileKey(meta.Type, e.ID)
-		if err := s.rooted.Remove(oldKey); err != nil && !os.IsNotExist(err) {
+		if err = s.rooted.Remove(oldKey); err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
 		s.echoes.Forget(s.layout.absPath(oldKey))
@@ -427,7 +428,16 @@ func (s *FSStore) updateEntityIf(
 		EntityID:   e.ID,
 		Face:       e.Face,
 	})
-	return store.VersionOf(stored), nil
+	// The version of what is ON DISK, not of the caller's entity: the codec
+	// normalizes on write (the body is reflowed by formatMarkdown, values go
+	// through YAML), so VersionOf(stored) would name a row nobody can read
+	// back, and a caller chaining a compare-and-swap with it would conflict
+	// with its own write (storetest CAS/ReturnedVersionSurvivesNormalization).
+	written, err := s.loadEntityMeta(entityMeta{ID: e.ID, Type: e.Type, Face: e.Face})
+	if err != nil {
+		return "", err
+	}
+	return store.VersionOf(written), nil
 }
 
 // forgetRelations drops index entries for relations whose files have been

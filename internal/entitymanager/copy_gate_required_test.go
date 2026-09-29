@@ -59,6 +59,7 @@ func depsForGateTest(t *testing.T, st store.Store, aclImpl acl.ACL) entitymanage
 		Audit: audit.Nop{}, ACL: aclImpl,
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}
 }
 

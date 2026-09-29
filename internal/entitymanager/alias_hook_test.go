@@ -63,6 +63,7 @@ func aliasHookManager(t *testing.T, rw entitymanager.AliasRewriter) (*entitymana
 	st := memstore.New()
 	mgr, err := entitymanager.New(entitymanager.Deps{
 		FieldGate:     entitymanager.AllowAllFieldGate{},
+		Twins:         entitymanager.NoTwinOwnership{},
 		Store:         st,
 		Meta:          aliasHookMeta(t),
 		Templater:     nopTemplater{},

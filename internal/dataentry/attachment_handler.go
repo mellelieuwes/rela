@@ -39,6 +39,9 @@ type attachmentHandler struct {
 	locker attachment.Locker
 	// uploads bounds concurrent uploads; shared with the remote MCP tools.
 	uploads *attachment.Limiter
+	// owned answers twin ownership (twinOwnedFields): an upload or delete on
+	// an externally owned file property is refused before any bytes change.
+	owned ownedFieldsFunc
 
 	// provision implements unmatched_principal: provision (TKT-ANUJDS), set by
 	// App after construction. Called at the top of each attachment write; a

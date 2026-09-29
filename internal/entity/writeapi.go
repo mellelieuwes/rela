@@ -81,6 +81,11 @@ type UpdateResult struct {
 	// post-write entity. Nil when there are none. Sorted by Path for
 	// stable client-facing ordering.
 	Warnings []Warning `json:"warnings,omitempty"`
+	// Version is the store's post-write version token for Entity: the value
+	// a later compare-and-swap passes as [Patch.ExpectedVersion] to assert
+	// nothing changed since this write. Empty when the write path produced
+	// none.
+	Version string `json:"version,omitempty"`
 }
 
 // DeleteResult describes entities and relations removed by a delete.

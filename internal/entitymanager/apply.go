@@ -59,6 +59,10 @@ func resolveUpsertOp(getErr error, createAudit, updateAudit string) (upsertOp, e
 //     must supply every field the record should have (including status) — there
 //     is no backfill, because automation is suppressed.
 //   - Unlike CreateEntity/UpdateEntity, it runs NO automation and NO cascade.
+//   - Unlike UpdateEntity/PatchEntity, it does NOT check twin ownership: a
+//     replica reproduces a state the origin already accepted, including owned
+//     fields its twin sync wrote, so re-checking would make a synced peer
+//     refuse its own twin's writes (see rejectTheirsChanges).
 //   - Like every write path, it authorizes against the ACL, validates against
 //     the metamodel (hard errors abort; soft conditions ride along as
 //     warnings), and emits an audit record AFTER the durable write (consistent

@@ -196,6 +196,7 @@ func rebindApp(app *App, fs storage.FS, paths *project.Context, svc *appbuild.Se
 		copies:             copyOffers,
 		schema:             app.State,
 		actionConditions:   func() ViewConditionFunc { return app.viewConditions },
+		owned:              twinOwnedFields(app),
 	}
 	app.serializer = entitySerializer{affordances: app.affordances}
 	// viewReader mirrors the production wiring (NewApp) so view-pipeline reads
@@ -254,6 +255,7 @@ func rebindApp(app *App, fs storage.FS, paths *project.Context, svc *appbuild.Se
 		gateRead:   app.gateReadOrNotFound,
 		locker:     app.attachmentLocker,
 		uploads:    app.attachmentUploads,
+		owned:      twinOwnedFields(app),
 		provision:  newProvisionSeam(app),
 	}
 
@@ -269,6 +271,9 @@ func rebindApp(app *App, fs storage.FS, paths *project.Context, svc *appbuild.Se
 	// SERVICE inside stays nil until a test calls SetComments, which is the
 	// "commenting disabled" state the 404 routes depend on.
 	app.comments = newCommentsHandler(app, svc.EntityManager())
+	// Twins handler likewise: its service stays nil until a test calls
+	// SetTwins, the "no pact declared" state.
+	app.twins = newTwinsHandler(app)
 
 	// writeHandler mirrors production wiring (see NewApp): closures for the
 	// swappable acl/audit collaborators, values for the fixed service handles,

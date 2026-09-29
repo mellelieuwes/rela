@@ -135,6 +135,7 @@ func TestManager_Elevated_DoesNotLeakIntoNestedCascade(t *testing.T) {
 		ACL:          acl.ReadOnlyACL{}, // deny-all, so a gated write is refused
 		Transitions:  statemachine.EmptySet(),
 		FieldGate:    entitymanager.AllowAllFieldGate{},
+		Twins:        entitymanager.NoTwinOwnership{},
 		Automations:  engine,
 		Cascade:      runner,
 		ScriptRunner: scripts,

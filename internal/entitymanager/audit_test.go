@@ -34,6 +34,7 @@ func newManagerWithAudit(
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}
 	if automations != nil {
 		engine := automation.NewEngine(automations)
@@ -1102,6 +1103,7 @@ func TestAudit_PartialCascadeDelete_AuditsWhatWasRemoved(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -1199,6 +1201,7 @@ func TestAudit_PartialCascadeDelete_ReplacePathAlsoAudits(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		Automations: engine,
 		Cascade:     runner,
 	})

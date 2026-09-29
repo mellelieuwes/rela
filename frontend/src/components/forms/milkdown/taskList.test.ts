@@ -248,6 +248,40 @@ describe('task list toggling', () => {
   })
 })
 
+// A read-only body (an external system owns it through a twin) still renders
+// its checkboxes. `editable: false` gates only ProseMirror's own handlers, and
+// the toggle is this module's listener, so it went straight through: the box
+// ticked, the document changed, and autosave sent a body PATCH the server then
+// refused. Nothing may change, and nothing may reach the form.
+describe('task list in a read-only editor', () => {
+  it.each([
+    ['read-only from mount', true],
+    ['made read-only after mount', false],
+  ])('ignores a checkbox click when %s', async (_name, atMount) => {
+    const src = '- [ ] todo\n'
+    const w = await mountEditor({ modelValue: src, readonly: atMount })
+    if (!atMount) {
+      await w.setProps({ readonly: true })
+      await flushPromises()
+    }
+    const box = checkboxes(w)[0]
+    // A native activation, which flips `checked` the way a browser does
+    // before the listener runs, so the assertion covers the restore too.
+    box.click()
+    await flushPromises()
+
+    expect(checkboxes(w)[0].checked).toBe(false)
+    expect(emitted(w)).toBe(src.trim())
+    // The form flushes before it saves; that path must be silent as well.
+    // `flush` is on the component's defineExpose, which `w.vm` does not type.
+    const exposed = w.vm as unknown as { flush: () => void }
+    exposed.flush()
+    await flushPromises()
+    expect(w.emitted('update:modelValue')).toBeUndefined()
+    w.unmount()
+  })
+})
+
 describe('task list command', () => {
   function runTaskList(w: ReturnType<typeof mount>) {
     const buttons = w.findAll('.toolbar-button')

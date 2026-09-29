@@ -43,6 +43,7 @@ func newManagerOverStore(t *testing.T, st store.Store) *entitymanager.Manager {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)

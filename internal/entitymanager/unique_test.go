@@ -55,6 +55,7 @@ func newUniqueManager(t *testing.T) *entitymanager.Manager {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -84,6 +85,7 @@ func newUniqueManagerWithAutomation(t *testing.T, autos []automation.Automation)
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		Automations: engine,
 		Cascade:     runner,
 	})

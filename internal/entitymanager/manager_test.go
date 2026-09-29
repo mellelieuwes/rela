@@ -183,6 +183,7 @@ func newManager(t *testing.T, automations []automation.Automation) (*entitymanag
 		ACL:         acl.NopACL{},
 		Transitions: machines,
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}
 	if automations != nil {
 		engine := automation.NewEngine(automations)
@@ -230,6 +231,7 @@ func TestNew_RejectsNilStore(t *testing.T) {
 	t.Parallel()
 	_, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Meta:      parseMeta(t),
 		Templater: nopTemplater{},
 	})
@@ -242,6 +244,7 @@ func TestNew_RejectsNilMeta(t *testing.T) {
 	t.Parallel()
 	_, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     memstore.New(),
 		Templater: nopTemplater{},
 	})
@@ -254,6 +257,7 @@ func TestNew_RejectsNilTemplater(t *testing.T) {
 	t.Parallel()
 	_, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     memstore.New(),
 		Meta:      parseMeta(t),
 	})
@@ -266,6 +270,7 @@ func TestNew_RejectsNilAudit(t *testing.T) {
 	t.Parallel()
 	_, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     memstore.New(),
 		Meta:      parseMeta(t),
 		Templater: nopTemplater{},
@@ -279,6 +284,7 @@ func TestNew_RejectsNilACL(t *testing.T) {
 	t.Parallel()
 	_, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     memstore.New(),
 		Meta:      parseMeta(t),
 		Templater: nopTemplater{},
@@ -293,6 +299,7 @@ func TestNew_RejectsNilTransitions(t *testing.T) {
 	t.Parallel()
 	_, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     memstore.New(),
 		Meta:      parseMeta(t),
 		Templater: nopTemplater{},
@@ -315,6 +322,7 @@ func TestNew_RejectsAutomationsWithoutCascade(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		Automations: engine,
 	})
 	if err == nil || !strings.Contains(err.Error(), "Automations and Cascade") {
@@ -332,6 +340,7 @@ func TestNew_AllowsNoAutomation(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -658,6 +667,7 @@ func TestCreate_PassesManagerAsMutator(t *testing.T) {
 		ACL:          acl.NopACL{},
 		Transitions:  statemachine.EmptySet(),
 		FieldGate:    entitymanager.AllowAllFieldGate{},
+		Twins:        entitymanager.NoTwinOwnership{},
 		Automations:  engine,
 		Cascade:      runner,
 		ScriptRunner: scripts,
@@ -977,6 +987,7 @@ func TestCreate_PropagatesNonConflictStoreError(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -1034,6 +1045,7 @@ func TestCreate_SoftValidationProducesWarning(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -1095,6 +1107,7 @@ func TestUpdate_SoftValidationProducesWarning(t *testing.T) {
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -75,6 +75,7 @@ func TestApplyEntity_CreateConflict_RejectsAndDoesNotClobber(t *testing.T) {
 	st := &raceCreateStore{Store: inner}
 	mgr, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     st, Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{}, ACL: acl.NopACL{}, Transitions: statemachine.EmptySet(),
 	})
 	if err != nil {
@@ -124,6 +125,7 @@ func TestApplyEntity_SameTypeCreateConflict_NoClobber(t *testing.T) {
 	st := &raceCreateStore{Store: inner}
 	mgr, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     st, Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{}, ACL: acl.NopACL{}, Transitions: statemachine.EmptySet(),
 	})
 	if err != nil {
@@ -190,6 +192,7 @@ func TestApplyEntity_UpdateVanished_RejectsWithoutCreating(t *testing.T) {
 	}
 	mgr, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     st, Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{}, ACL: acl.NopACL{}, Transitions: statemachine.EmptySet(),
 	})
 	if err != nil {

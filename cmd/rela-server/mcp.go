@@ -105,8 +105,8 @@ func remoteAttachmentDeps(svc *appbuild.Services, host dataentry.MCPHost) relamc
 	return relamcp.AttachmentDeps{
 		Snapshot: func() (relamcp.AttachmentSnapshot, error) {
 			meta, limit := host.AttachmentPolicy()
-			return relamcp.NewAttachmentSnapshot(
-				svc.Store(), svc.EntityManager(), host.AttachmentLocker, svc.ACL(), meta, host.AttachmentRunner, limit)
+			return relamcp.NewAttachmentSnapshot(svc.Store(), svc.EntityManager(), host.AttachmentLocker, svc.ACL(),
+				appbuild.TwinOwnership(svc), meta, host.AttachmentRunner, limit)
 		},
 		Uploads:    host.AttachmentUploads,
 		Authorizer: svc.ACL(),

@@ -45,6 +45,34 @@ func RunCASTests(t *testing.T, f Factory) {
 		assert.NotEqual(t, v, next, "a content change must move the version")
 	})
 
+	// A backend that normalizes what it stores (fsstore reflows the body)
+	// must return the version of what it stored, not of what it was given:
+	// the token is only useful if a later read reproduces it and a chained
+	// compare-and-swap accepts it.
+	t.Run("ReturnedVersionSurvivesNormalization", func(t *testing.T) {
+		s := f(t)
+		e := entity.New("FEAT-001", "feature")
+		e.SetString("title", "Login")
+		require.NoError(t, s.CreateEntity(ctx(), e))
+
+		read, err := s.GetEntity(ctx(), e.ID)
+		require.NoError(t, err)
+		v := store.VersionOf(read)
+		read.Content = "## Notes\n\nA single paragraph that is long enough to be reflowed by a backend " +
+			"that wraps markdown before writing it to disk, which is exactly the case this pins.\n\n\n\n- a\n-  b\n"
+		next, err := s.UpdateEntityIf(ctx(), read, store.UpdateCondition{ExpectedVersion: v})
+		require.NoError(t, err)
+
+		got, err := s.GetEntity(ctx(), e.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.VersionOf(got), next,
+			"the returned version must be the version of the row as stored, after any normalization")
+
+		got.SetString("title", "Login v2")
+		_, err = s.UpdateEntityIf(ctx(), got, store.UpdateCondition{ExpectedVersion: next})
+		require.NoError(t, err, "a chained compare-and-swap with the returned version must apply")
+	})
+
 	t.Run("StaleVersionConflicts", func(t *testing.T) {
 		s := f(t)
 		e := entity.New("FEAT-001", "feature")

@@ -82,6 +82,9 @@ func TestRouterWalk_AllAPIRoutesReachHandlers(t *testing.T) {
 		// failure rather than a silently-identical status.
 		{http.MethodGet, "/api/v1/_comments/ticket/TKT-001", http.StatusNotFound},
 		{http.MethodPost, "/api/v1/_comments/ticket/TKT-001/c1/accept", http.StatusNotFound},
+		// Twins: the fixture declares no pact, so the handler answers its own
+		// JSON 404 (feature absent), like comments above.
+		{http.MethodGet, "/api/v1/_twins/ticket/TKT-001", http.StatusNotFound},
 		{http.MethodGet, "/api/v1/_conflicts", 0},
 		{http.MethodGet, "/api/v1/_conflicts/some-id", 0},
 		{http.MethodGet, "/api/v1/_documents/readme", 0},

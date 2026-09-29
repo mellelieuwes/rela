@@ -11,6 +11,7 @@ import (
 
 	"github.com/Sourcehaven-BV/rela/internal/attachment"
 	"github.com/Sourcehaven-BV/rela/internal/entity"
+	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
 	"github.com/Sourcehaven-BV/rela/internal/lock"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
 )
@@ -141,6 +142,7 @@ func TestService_LockWaitExpiryIsErrBusy(t *testing.T) {
 	}
 	svc, err := attachment.New(attachment.Deps{
 		Store: f.st, Meta: f.meta, EntityManager: f.mgr, Locker: expiredLocker{}, Authorizer: attachment.AllowAllWrites{},
+		Twins: entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("attachment.New: %v", err)
@@ -173,6 +175,7 @@ func TestService_CallerDeadlineIsNotErrBusy(t *testing.T) {
 	defer release()
 	svc, err := attachment.New(attachment.Deps{
 		Store: f.st, Meta: f.meta, EntityManager: f.mgr, Locker: held, Authorizer: attachment.AllowAllWrites{},
+		Twins: entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("attachment.New: %v", err)
@@ -216,6 +219,7 @@ func TestService_ReauthorizesUnderLock(t *testing.T) {
 	denied, err := attachment.New(attachment.Deps{
 		Store: f.st, Meta: f.meta, EntityManager: f.mgr,
 		Locker: lock.NewMemoryLocker(), Authorizer: denyWrites{},
+		Twins: entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("attachment.New: %v", err)

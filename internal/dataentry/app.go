@@ -246,6 +246,9 @@ type App struct {
 	// `comments:` block, which is the "feature absent" signal — the routes 404
 	// and no storage is touched.
 	comments *commentsHandler
+	// twins owns the twins read-out route and answers field ownership.
+	// Always non-nil; its service is nil when no pact is declared.
+	twins    *twinsHandler
 	searcher search.Searcher
 	// visibleSearcher is the ACL-scoped search seam (TKT-BA8BSX):
 	// executeQuery routes free-text searches through it so /_search
@@ -1016,6 +1019,7 @@ func NewApp(
 		copies:             copyOffers,
 		schema:             app.State,
 		actionConditions:   func() ViewConditionFunc { return app.viewConditions },
+		owned:              twinOwnedFields(app),
 	}
 
 	app.serializer = entitySerializer{affordances: app.affordances}
@@ -1201,6 +1205,8 @@ func NewApp(
 	// App under its method cap. Built unconditionally: the SERVICE it wraps is
 	// installed later by SetComments and stays nil when commenting is off.
 	app.comments = newCommentsHandler(app, em)
+	// twinsHandler, the same way: the service is installed by SetTwins.
+	app.twins = newTwinsHandler(app)
 
 	// attachmentHandler owns the entity-attachment routes. Constructed after
 	// the runner wiring above so it captures the resolved runner. The acl/
@@ -1223,6 +1229,7 @@ func NewApp(
 		gateRead:   app.gateReadOrNotFound,
 		locker:     app.attachmentLocker,
 		uploads:    app.attachmentUploads,
+		owned:      twinOwnedFields(app),
 		provision:  newProvisionSeam(app),
 	}
 

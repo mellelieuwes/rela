@@ -259,3 +259,75 @@ func TestV1ConflictResolveRelationWritesAndAudits(t *testing.T) {
 		t.Errorf("expected an update-relation audit record, got %+v", sink.Records())
 	}
 }
+
+// conflictedTwinTicket is twinTicket in conflict: "ours" carries the stored
+// values, "theirs" another title and body.
+const conflictedTwinTicket = `<<<<<<< HEAD
+---
+id: TKT-001
+type: ticket
+title: Secret launch codename
+status: open
+---
+The body.
+=======
+---
+id: TKT-001
+type: ticket
+title: Theirs
+status: open
+---
+Their body.
+>>>>>>> incoming
+`
+
+// TestV1ConflictResolve_TwinOwnership: a resolution bypasses entitymanager,
+// so the handler itself must refuse one that changes a field an external
+// system owns through a twin — 422 externally_owned, the file untouched. A
+// resolution that keeps the owned value passes.
+func TestV1ConflictResolve_TwinOwnership(t *testing.T) {
+	const path = "entities/ticket/TKT-001.md"
+	cases := []struct {
+		name   string
+		theirs []string
+		body   string
+		want   int
+	}{
+		{"owned title changed", []string{"title"},
+			`{"path":"` + path + `","property_choices":{"title":"theirs"},"content_choice":"theirs"}`,
+			http.StatusUnprocessableEntity},
+		{"owned body rewritten", []string{"body"},
+			`{"path":"` + path + `","property_choices":{"title":"theirs"},"content_choice":"manual","manual_content":"Mine."}`,
+			http.StatusUnprocessableEntity},
+		{"owned title kept", []string{"title"},
+			`{"path":"` + path + `","property_choices":{"title":"ours"},"content_choice":"theirs"}`,
+			http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, svc := twinsApp(t, tc.theirs...)
+			root := t.TempDir()
+			bindRepo(app, root)
+			SetTwins(app, svc) // bindRepo rebuilt the twins handler
+			file := writeProjectFile(t, root, path, conflictedTwinTicket)
+
+			rec := postConflictResolve(app, tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("got %d, want %d: %s", rec.Code, tc.want, rec.Body)
+			}
+			got, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if tc.want == http.StatusOK {
+				return
+			}
+			if !strings.Contains(rec.Body.String(), "/errors/externally_owned") {
+				t.Errorf("body = %s, want the externally_owned problem", rec.Body)
+			}
+			if string(got) != conflictedTwinTicket {
+				t.Errorf("a refused resolution rewrote the file:\n%s", got)
+			}
+		})
+	}
+}

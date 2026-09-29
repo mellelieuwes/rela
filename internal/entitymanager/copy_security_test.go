@@ -110,6 +110,7 @@ func newCopyManager(
 		ACL:            acl.NopACL{},
 		Transitions:    statemachine.EmptySet(),
 		FieldGate:      entitymanager.AllowAllFieldGate{},
+		Twins:          entitymanager.NoTwinOwnership{},
 		CopyVisibility: reader,
 		CopyGuard:      guard,
 	})
@@ -262,6 +263,7 @@ copies:
 			Audit: audit.Nop{}, ACL: acl.NopACL{},
 			Transitions: statemachine.EmptySet(),
 			FieldGate:   entitymanager.AllowAllFieldGate{},
+			Twins:       entitymanager.NoTwinOwnership{},
 			CopyGuard:   g,
 		})
 		if err != nil {
@@ -355,6 +357,7 @@ func TestCopy_GuardedFaceIsWritableOnlyViaDefinition(t *testing.T) {
 		Audit: audit.Nop{}, ACL: d,
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		CopyGuard:   allowGuard{allow: true},
 		// The subject here is the GUARD and the write verdict, not the read
 		// gates, so both are opted out explicitly — permissive, so a refusal
@@ -408,6 +411,7 @@ func TestCopy_GuardedFaceIsWritableOnlyViaDefinition(t *testing.T) {
 		Audit: audit.Nop{}, ACL: d,
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		CopyGuard:   allowGuard{allow: false},
 		// Permissive read gates, so the refusal below can only be the
 		// denying guard — the point of case (c) (#1437).
@@ -462,6 +466,7 @@ func TestCopy_StrangerCannotPromote(t *testing.T) {
 		Audit: audit.Nop{}, ACL: d,
 		Transitions:  statemachine.EmptySet(),
 		FieldGate:    entitymanager.AllowAllFieldGate{},
+		Twins:        entitymanager.NoTwinOwnership{},
 		CopyGuard:    allowGuard{allow: true}, // even a PERMISSIVE guard
 		CopyReadGate: req,
 		// This is a SAME-ENTITY copy, which never consults CopyVisibility
@@ -552,6 +557,7 @@ copies:
 		Audit: audit.Nop{}, ACL: acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 		CopyGuard:   allowGuard{allow: true},
 	})
 	if err != nil {

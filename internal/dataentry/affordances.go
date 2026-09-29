@@ -16,6 +16,7 @@ import (
 	"github.com/Sourcehaven-BV/rela/internal/acl"
 	v1 "github.com/Sourcehaven-BV/rela/internal/apiwire/v1"
 	"github.com/Sourcehaven-BV/rela/internal/audit"
+	"github.com/Sourcehaven-BV/rela/internal/canonical"
 	entityPkg "github.com/Sourcehaven-BV/rela/internal/entity"
 	"github.com/Sourcehaven-BV/rela/internal/entitymanager"
 	"github.com/Sourcehaven-BV/rela/internal/metamodel"
@@ -133,6 +134,10 @@ type affordanceService struct {
 	// that declare a when.
 	schema           func() *Schema
 	actionConditions func() ViewConditionFunc
+	// owned answers twin ownership (which fields an external system owns).
+	// OPTIONAL: nil when no twins service is wired, and then nothing is
+	// owned — see twinOwnership.
+	owned ownedFieldsFunc
 }
 
 // perItemVerbs are the verbs computed per entity instance.
@@ -268,19 +273,42 @@ type FieldVerdicts struct {
 	// serialized to the wire. Sparse: only denials appear. Empty for
 	// resolvers (Nop / Demo) that don't track attribution.
 	Attribution map[string]string
+
+	// owned is the entity's twin ownership: properties and body an external
+	// system owns. Its properties are also Writable=false; it is kept to name
+	// the owner in `_fields` and to set `content_writable`.
+	owned fieldOwnership
 }
 
 // fieldVerdicts overlays schema-intrinsic read-only fields onto the
 // policy-derived verdict. Computed properties are materialized for display but
-// can never be authored, regardless of ACL role.
+// can never be authored, regardless of ACL role; fields an external system
+// owns through a twin are authored there, not here.
 func (svc affordanceService) fieldVerdicts(ctx context.Context, e *entityPkg.Entity) FieldVerdicts {
+	v, def := svc.schemaFieldVerdicts(ctx, e)
+	if def == nil {
+		return v
+	}
+	v.owned = svc.twinOwnership(ctx, e, def)
+	for name := range v.owned.props {
+		v.Writable[name] = false
+	}
+	return v
+}
+
+// schemaFieldVerdicts is the policy verdict with computed properties marked
+// read-only, and the entity's type definition (nil when e or its type is
+// unknown, in which case the verdict is the policy's alone).
+func (svc affordanceService) schemaFieldVerdicts(
+	ctx context.Context, e *entityPkg.Entity,
+) (FieldVerdicts, *metamodel.EntityDef) {
 	v := svc.resolver().FieldVerdicts(ctx, e)
 	if e == nil {
-		return v
+		return v, nil
 	}
 	def, ok := svc.meta().GetEntityDef(e.Type)
 	if !ok {
-		return v
+		return v, nil
 	}
 	v.Writable = maps.Clone(v.Writable)
 	if v.Writable == nil {
@@ -291,7 +319,7 @@ func (svc affordanceService) fieldVerdicts(ctx context.Context, e *entityPkg.Ent
 			v.Writable[name] = false
 		}
 	}
-	return v
+	return v, def
 }
 
 // RelationVerdicts carries per-entity relation-level affordance
@@ -335,6 +363,10 @@ const (
 	RuleRelationNotCreatable AffordanceDenialRule = "relation-affordance:not-creatable"
 	RuleRelationNotRemovable AffordanceDenialRule = "relation-affordance:not-removable"
 	RuleRelationMetaReadOnly AffordanceDenialRule = "relation-affordance:meta-read-only"
+	// RuleFieldExternallyOwned refuses a change to a field an external system
+	// owns through a twin. Answered with 422, not 403: it is not a permission
+	// the caller lacks, the change belongs in the other system.
+	RuleFieldExternallyOwned AffordanceDenialRule = "field-affordance:externally-owned"
 )
 
 // AffordanceDenialError reports why a write was rejected by the
@@ -370,16 +402,20 @@ func (d AffordanceDenialError) Error() string {
 // proposed property writes trigger. Returns nil when every requested
 // field is permitted.
 //
-// The validator handles four classes of denial:
+// The validator handles five classes of denial:
 //
 //  1. Unknown fields (not declared in the metamodel) — rejected with
 //     RuleFieldHidden so the response is byte-equivalent to a true
 //     hidden-field rejection. This closes the F8 side channel.
 //  2. Hidden fields — Visible[name] == false in the resolver verdict.
-//  3. Read-only fields — Writable[name] == false. Strict: same-value
+//  3. Externally owned fields — an external system owns the field through
+//     a twin. Change-based, unlike (4): a write that leaves the stored
+//     value unchanged passes, as it does at the manager's own guard, so a
+//     whole-entity save of a twinned entity is not refused.
+//  4. Read-only fields — Writable[name] == false. Strict: same-value
 //     writes are not exempted (useAutoSave does no-op suppression
 //     client-side; the server doesn't repeat that logic).
-//  4. Filtered enum options — Options[name][value] == false.
+//  5. Filtered enum options — Options[name][value] == false.
 //
 // `setKeys` is the set of property names being written (from
 // `properties` in the PATCH body); `unsetKeys` is the set being
@@ -392,10 +428,22 @@ func (d AffordanceDenialError) Error() string {
 func (svc affordanceService) validateFieldWrite(
 	ctx context.Context, e *entityPkg.Entity, setKeys map[string]any, unsetKeys []string,
 ) *AffordanceDenialError {
+	return svc.validateEntityWrite(ctx, e, setKeys, unsetKeys, nil)
+}
+
+// validateEntityWrite is validateFieldWrite plus the body: content, when
+// non-nil, is the proposed markdown body, refused when an external system
+// owns the body and the proposal changes it.
+func (svc affordanceService) validateEntityWrite(
+	ctx context.Context, e *entityPkg.Entity, setKeys map[string]any, unsetKeys []string, content *string,
+) *AffordanceDenialError {
 	if e == nil {
 		return nil
 	}
-	v := svc.fieldVerdicts(ctx, e)
+	// The ownership-free verdict: an owned field is refused only when the
+	// write changes it, so the strict read-only check below must not see it.
+	v, def := svc.schemaFieldVerdicts(ctx, e)
+	owned := svc.twinOwnership(ctx, e, def)
 	declared := declaredProperties(svc.meta(), e.Type)
 
 	check := func(key string, value any, present bool) *AffordanceDenialError {
@@ -416,6 +464,9 @@ func (svc affordanceService) validateFieldWrite(
 				Reason:      fmt.Sprintf("field %q is not visible", key),
 				Attribution: v.Attribution[key],
 			}
+		}
+		if owned.ownsProperty(key) && !canonical.EqualValue(e.Properties[key], value) {
+			return owned.denial(e, key)
 		}
 		// Read-only via resolver verdict.
 		if !v.IsWritable(key) {
@@ -454,6 +505,9 @@ func (svc affordanceService) validateFieldWrite(
 		if d := check(k, nil, false); d != nil {
 			return d
 		}
+	}
+	if content != nil && owned.content && !canonical.EqualBody(e.Content, *content) {
+		return owned.denial(e, metamodel.PactBodyField)
 	}
 	return nil
 }
@@ -537,9 +591,18 @@ func knownToResolver(v FieldVerdicts, name string) bool {
 // response. The wire shape mirrors writeForbiddenIfACLDenied (the
 // ACL helper) so SPA error-handling can treat the two uniformly.
 //
+// The exception is RuleFieldExternallyOwned: ownership is not a permission,
+// so it answers with the same 422 problem the manager's own ownership guard
+// produces (writeExternallyOwned), and a client sees one response for "owned
+// by basecamp" whichever layer refused the write.
+//
 // Prefer App.denyAffordance when handler context is available — it
 // emits the audit row in addition to writing the response.
 func writeAffordanceDenialError(w http.ResponseWriter, denial AffordanceDenialError) {
+	if denial.Rule == RuleFieldExternallyOwned {
+		writeExternallyOwned(w, denial.Reason)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	_ = json.NewEncoder(w).Encode(map[string]string{
@@ -550,9 +613,9 @@ func writeAffordanceDenialError(w http.ResponseWriter, denial AffordanceDenialEr
 	})
 }
 
-// denyAffordance writes the 403 response AND records a `denied-write`
-// audit row attributed to the request principal. Use from every
-// affordance-gate site so the audit stream is uniform with ACL
+// denyAffordance writes the denial response (see writeAffordanceDenialError)
+// AND records a `denied-write` audit row attributed to the request principal.
+// Use from every affordance-gate site so the audit stream is uniform with ACL
 // denials (which the entitymanager emits the same op for).
 //
 // `target` is the entity the gate fired on — used to populate the
@@ -810,6 +873,9 @@ func computeFieldAffordancesFrom(v FieldVerdicts) map[string]v1.FieldAffordance 
 		entry := out[name]
 		f := false
 		entry.Writable = &f
+		if systems, owned := v.owned.props[name]; owned {
+			entry.Reason = v.owned.reason(systems)
+		}
 		out[name] = entry
 	}
 
@@ -1224,6 +1290,8 @@ func (svc affordanceService) attachEntityAffordances(ctx context.Context, e *ent
 	relations := svc.computeRelationAffordances(ctx, e)
 	result.FieldAffordances = &fields
 	result.RelationAffordances = &relations
+	contentWritable := !verdicts.owned.content
+	result.ContentWritable = &contentWritable
 	// `_redacted` names what stripHiddenProperties removed, so a write surface
 	// can tell "hidden" from "never set" instead of guessing from absence
 	// (DEC-T0XIWQ). Rides the per-entity shapes only, like `_fields`.

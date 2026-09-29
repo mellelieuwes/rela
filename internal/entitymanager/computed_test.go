@@ -47,6 +47,7 @@ func newComputedManager(t *testing.T, st *memstore.MemStore) *entitymanager.Mana
 		Store: st, Meta: meta, Templater: nopTemplater{}, Audit: audit.Nop{},
 		ACL: acl.NopACL{}, Transitions: statemachine.EmptySet(),
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatal(err)

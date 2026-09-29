@@ -48,6 +48,7 @@ func newManagerWithStoreAndAudit(
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	}
 	if automations != nil {
 		engine := automation.NewEngine(automations)

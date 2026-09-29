@@ -25,6 +25,7 @@ func newApplyManager(t *testing.T, st store.Store, sink audit.Audit) *entitymana
 		ACL:         acl.NopACL{},
 		Transitions: statemachine.EmptySet(),
 		FieldGate:   entitymanager.AllowAllFieldGate{},
+		Twins:       entitymanager.NoTwinOwnership{},
 	})
 	if err != nil {
 		t.Fatalf("entitymanager.New: %v", err)
@@ -418,6 +419,7 @@ func seedViaManager(t *testing.T, st store.Store, id, typ string) {
 	t.Helper()
 	mgr, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     st, Meta: parseMeta(t), Templater: nopTemplater{}, Audit: audit.Nop{}, ACL: acl.NopACL{}, Transitions: statemachine.EmptySet(),
 	})
 	if err != nil {
@@ -437,6 +439,7 @@ func TestApplyEntity_ACLDenied(t *testing.T) {
 	st := memstore.New()
 	mgr, err := entitymanager.New(entitymanager.Deps{
 		FieldGate: entitymanager.AllowAllFieldGate{},
+		Twins:     entitymanager.NoTwinOwnership{},
 		Store:     st, Meta: parseMeta(t), Templater: nopTemplater{}, Audit: audit.Nop{}, ACL: acl.ReadOnlyACL{}, Transitions: statemachine.EmptySet(),
 	})
 	if err != nil {

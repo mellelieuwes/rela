@@ -36,6 +36,9 @@ defineProps<{
   saveGeneration: number
   getPropertyDef: (name: string) => PropertyDef | undefined
   isFieldReadonly: (field: FormFieldOrRelation) => boolean
+  // Why a field is read-only, when the server says (`_fields[name].reason`).
+  // Optional: hosts without that verdict omit it.
+  readonlyReasonFor?: (field: FormFieldOrRelation) => string | undefined
   optionVerdictsFor: (field: FormFieldOrRelation) => Record<string, boolean> | undefined
   // Resolved state-machine transitions per field (TKT-3G93B8); undefined for a
   // non-machine field. Present → FieldRenderer renders the StatusControl.
@@ -65,6 +68,7 @@ const emit = defineEmits<{
       :value="formData[field.property]"
       :error="errors[field.property]"
       :readonly="isFieldReadonly(field)"
+      :readonly-reason="readonlyReasonFor?.(field)"
       :option-verdicts="optionVerdictsFor(field)"
       :transition-options="transitionsFor(field)"
       :entity-type="entityType"

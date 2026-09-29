@@ -285,6 +285,7 @@ func validate(m *Metamodel) error {
 	validationErrors = append(validationErrors, validateValidationRelations(m)...)
 	validationErrors = append(validationErrors, validateAutomationFaces(m)...)
 	validationErrors = append(validationErrors, validateComments(m)...)
+	validationErrors = append(validationErrors, validatePacts(m)...)
 
 	if len(validationErrors) > 0 {
 		return &SchemaValidationError{Errors: validationErrors}
